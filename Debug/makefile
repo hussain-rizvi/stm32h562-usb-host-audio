@@ -73,7 +73,7 @@ main-build: test_usb_host_audio.elf secondary-outputs
 
 # Tool invocations
 test_usb_host_audio.elf test_usb_host_audio.map: $(OBJS) $(USER_OBJS) C:\Users\HH\ Traders\Documents\test_usb_host_audio\STM32H562RGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "test_usb_host_audio.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m33 -T"C:\Users\HH Traders\Documents\test_usb_host_audio\STM32H562RGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="test_usb_host_audio.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+	arm-none-eabi-gcc -o "test_usb_host_audio.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m33 -T"C:\Users\HH Traders\Documents\test_usb_host_audio\STM32H562RGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="test_usb_host_audio.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
