@@ -1,2 +1,0 @@
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_transfer_request.c:93:7:_ux_host_stack_transfer_request	56	static,ignoring_inline_asm
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_transfer_request.c:259:7:_uxe_host_stack_transfer_request	16	static

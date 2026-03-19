@@ -1,2 +1,0 @@
-../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_control_request.c:88:9:_ux_host_class_audio_control_request	40	static
-../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_control_request.c:223:9:_uxe_host_class_audio_control_request	48	static

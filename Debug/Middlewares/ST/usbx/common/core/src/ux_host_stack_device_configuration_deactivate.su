@@ -1,2 +1,0 @@
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_device_configuration_deactivate.c:86:7:_ux_host_stack_device_configuration_deactivate	80	static
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_device_configuration_deactivate.c:237:7:_uxe_host_stack_device_configuration_deactivate	16	static

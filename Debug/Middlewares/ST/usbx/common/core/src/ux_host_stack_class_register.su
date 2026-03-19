@@ -1,2 +1,0 @@
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_class_register.c:88:7:_ux_host_stack_class_register	32	static
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_class_register.c:217:7:_uxe_host_stack_class_register	16	static

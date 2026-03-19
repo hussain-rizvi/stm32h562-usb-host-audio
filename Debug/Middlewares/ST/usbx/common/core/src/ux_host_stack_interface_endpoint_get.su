@@ -1,2 +1,0 @@
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_interface_endpoint_get.c:79:7:_ux_host_stack_interface_endpoint_get	32	static
-../Middlewares/ST/usbx/common/core/src/ux_host_stack_interface_endpoint_get.c:180:7:_uxe_host_stack_interface_endpoint_get	24	static
