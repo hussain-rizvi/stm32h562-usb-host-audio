@@ -1,0 +1,4 @@
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_callback.c:74:6:HAL_HCD_Connect_Callback	24	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_callback.c:137:6:HAL_HCD_Disconnect_Callback	24	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_callback.c:207:6:HAL_HCD_HC_NotifyURBChange_Callback	72	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_callback.c:494:6:HAL_HCD_SOF_Callback	24	static

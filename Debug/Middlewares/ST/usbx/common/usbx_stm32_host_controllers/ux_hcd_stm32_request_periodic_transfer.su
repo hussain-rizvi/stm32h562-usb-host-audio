@@ -1,0 +1,1 @@
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_request_periodic_transfer.c:80:7:_ux_hcd_stm32_request_periodic_transfer	48	static,ignoring_inline_asm

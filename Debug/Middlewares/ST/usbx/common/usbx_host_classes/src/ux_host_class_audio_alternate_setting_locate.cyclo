@@ -1,0 +1,3 @@
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_alternate_setting_locate.c:86:7:_ux_host_class_audio_alternate_setting_locate	1
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_alternate_setting_locate.c:271:13:_ux_host_class_audio_alt_locate_parse	7
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_alternate_setting_locate.c:330:20:_ux_host_class_audio_alternate_setting_locate_2	3

@@ -1,0 +1,2 @@
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_interrupt_start.c:80:9:_ux_host_class_audio_interrupt_start	24	static
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_interrupt_start.c:185:9:_uxe_host_class_audio_interrupt_start	24	static

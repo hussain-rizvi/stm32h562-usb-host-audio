@@ -1,0 +1,4 @@
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_request_control_transfer.c:95:7:_ux_hcd_stm32_request_control_transfer	32	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_request_control_transfer.c:360:20:_ux_hcd_stm32_request_control_setup	56	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_request_control_transfer.c:436:20:_ux_hcd_stm32_request_control_data	48	static
+../Middlewares/ST/usbx/common/usbx_stm32_host_controllers/ux_hcd_stm32_request_control_transfer.c:514:20:_ux_hcd_stm32_request_control_status	48	static

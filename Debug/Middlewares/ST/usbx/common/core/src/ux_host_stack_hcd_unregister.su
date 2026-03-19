@@ -1,0 +1,2 @@
+../Middlewares/ST/usbx/common/core/src/ux_host_stack_hcd_unregister.c:85:7:_ux_host_stack_hcd_unregister	48	static
+../Middlewares/ST/usbx/common/core/src/ux_host_stack_hcd_unregister.c:240:7:_uxe_host_stack_hcd_unregister	24	static

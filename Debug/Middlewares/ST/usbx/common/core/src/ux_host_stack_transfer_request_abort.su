@@ -1,0 +1,2 @@
+../Middlewares/ST/usbx/common/core/src/ux_host_stack_transfer_request_abort.c:90:7:_ux_host_stack_transfer_request_abort	32	static
+../Middlewares/ST/usbx/common/core/src/ux_host_stack_transfer_request_abort.c:189:7:_uxe_host_stack_transfer_request_abort	16	static

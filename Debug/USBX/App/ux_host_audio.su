@@ -1,0 +1,5 @@
+../USBX/App/ux_host_audio.c:68:13:audio_transfer_complete	16	static
+../USBX/App/ux_host_audio.c:73:13:wav_parse_header	80	static
+../USBX/App/ux_host_audio.c:150:13:audio_stream_wav	72	static
+../USBX/App/ux_host_audio.c:227:13:str_ends_with_wav	24	static
+../USBX/App/ux_host_audio.c:244:6:audio_playback_wav_files	816	static

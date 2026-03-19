@@ -1,0 +1,2 @@
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_descriptors_parse.c:86:6:_ux_host_class_audio_descriptors_parse	72	static
+../Middlewares/ST/usbx/common/usbx_host_classes/src/ux_host_class_audio_descriptors_parse.c:253:6:_uxe_host_class_audio_descriptors_parse	24	static
