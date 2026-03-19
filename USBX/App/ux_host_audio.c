@@ -25,6 +25,9 @@
 /* USER CODE BEGIN Includes */
 #include "tx_api.h"
 #include "fx_api.h"
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_NO_SIMD
+#include "minimp3.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -237,6 +240,139 @@ static UINT str_ends_with_wav(CHAR *name)
             (name[len-1] == 'v' || name[len-1] == 'V'));
 }
 
+static UINT str_ends_with_mp3(CHAR *name)
+{
+    UINT len = 0;
+    while (name[len] != '\0')
+        len++;
+    if (len < 4)
+        return 0;
+    return ((name[len-4] == '.') &&
+            (name[len-3] == 'm' || name[len-3] == 'M') &&
+            (name[len-2] == 'p' || name[len-2] == 'P') &&
+            (name[len-1] == '3'));
+}
+
+#define MP3_READ_BUF_SIZE  4096
+
+static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
+{
+    mp3dec_t dec;
+    mp3dec_frame_info_t info;
+    UCHAR mp3_buf[MP3_READ_BUF_SIZE];
+    mp3d_sample_t pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    ULONG mp3_size = 0;
+    UINT sampling_set = 0;
+    UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
+    ULONG packet_size = AUDIO_MAX_PACKET_SIZE;
+    UINT fill_idx = 0;
+    INT in_flight_idx = -1;
+    UINT status;
+    ULONG bytes_read;
+    int consumed;
+    int samples;
+    int pcm_bytes;
+    int pcm_offset;
+    int to_send;
+
+    static UCHAR audio_buffer[2][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
+    static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_xfer[2];
+
+    mp3dec_init(&dec);
+
+    while (1)
+    {
+        if (mp3_size < 1440)
+        {
+            ULONG to_read = MP3_READ_BUF_SIZE - mp3_size;
+            status = fx_file_read(file, mp3_buf + mp3_size, to_read, &bytes_read);
+            if (status != FX_SUCCESS)
+                return UX_ERROR;
+            mp3_size += bytes_read;
+            if (bytes_read == 0 && mp3_size == 0)
+                break;
+        }
+
+        samples = mp3dec_decode_frame(&dec, (const uint8_t *)mp3_buf, mp3_size, pcm_buf, &info);
+        consumed = info.frame_bytes;
+
+        if (samples <= 0)
+        {
+            if (mp3_size == 0)
+                break;
+            if (mp3_size == MP3_READ_BUF_SIZE)
+            {
+                memmove(mp3_buf, mp3_buf + 1, mp3_size - 1);
+                mp3_size--;
+            }
+            else
+                break;
+            continue;
+        }
+
+        memmove(mp3_buf, mp3_buf + consumed, mp3_size - consumed);
+        mp3_size -= consumed;
+
+        pcm_bytes = samples * (int)sizeof(mp3d_sample_t);
+
+        if (!sampling_set)
+        {
+            audio_sampling.ux_host_class_audio_sampling_channels   = (ULONG)info.channels;
+            audio_sampling.ux_host_class_audio_sampling_frequency   = (ULONG)info.hz;
+            audio_sampling.ux_host_class_audio_sampling_resolution  = 16;
+            status = ux_host_class_audio_streaming_sampling_set(audio, &audio_sampling);
+            if (status != UX_SUCCESS)
+                return status;
+            packet_size = ux_host_class_audio_packet_size_get(audio);
+            if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
+                packet_size = AUDIO_MAX_PACKET_SIZE;
+            sampling_set = 1;
+        }
+
+        pcm_offset = 0;
+        while (pcm_offset < pcm_bytes)
+        {
+            to_send = (pcm_bytes - pcm_offset > (int)packet_size) ? (int)packet_size : (pcm_bytes - pcm_offset);
+            memcpy(audio_buffer[fill_idx], (UCHAR *)pcm_buf + pcm_offset, to_send);
+            if (to_send < (int)packet_size)
+            {
+                ULONG i;
+                for (i = to_send; i < packet_size; i++)
+                    audio_buffer[fill_idx][i] = 0;
+            }
+
+            if (in_flight_idx >= 0)
+            {
+                status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+                if (status != TX_SUCCESS)
+                    return UX_ERROR;
+            }
+
+            audio_xfer[fill_idx].ux_host_class_audio_transfer_request_data_pointer = audio_buffer[fill_idx];
+            audio_xfer[fill_idx].ux_host_class_audio_transfer_request_requested_length = packet_size;
+            audio_xfer[fill_idx].ux_host_class_audio_transfer_request_packet_size = packet_size;
+            audio_xfer[fill_idx].ux_host_class_audio_transfer_request_completion_function = audio_transfer_complete;
+
+            status = ux_host_class_audio_write(audio, &audio_xfer[fill_idx]);
+            if (status != UX_SUCCESS)
+                return status;
+
+            in_flight_idx = (INT)fill_idx;
+            fill_idx = 1U - fill_idx;
+            pcm_offset += to_send;
+        }
+    }
+
+    if (in_flight_idx >= 0)
+    {
+        status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+        if (status != TX_SUCCESS)
+            return UX_ERROR;
+    }
+
+    return UX_SUCCESS;
+}
+
 /* USER CODE END 0 */
 
 /* USER CODE BEGIN 1 */
@@ -247,7 +383,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     CHAR entry_name[FX_MAX_LONG_NAME_LEN];
     UINT file_attributes;
     ULONG file_size;
-    FX_FILE wav_file;
+    FX_FILE audio_file;
     WAV_INFO wav_info;
 
     tx_semaphore_create(&audio_xfer_semaphore, "audio_xfer_sem", 0);
@@ -264,15 +400,27 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
 
             if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
             {
-                status = fx_file_open(media, &wav_file, entry_name, FX_OPEN_FOR_READ);
+                status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 if (status == FX_SUCCESS)
                 {
-                    status = wav_parse_header(&wav_file, &wav_info);
+                    status = wav_parse_header(&audio_file, &wav_info);
                     if (status == FX_SUCCESS)
                     {
-                        status = audio_stream_wav(audio, &wav_file, &wav_info);
+                        status = audio_stream_wav(audio, &audio_file, &wav_info);
                     }
-                    fx_file_close(&wav_file);
+                    fx_file_close(&audio_file);
+
+                    if (status != FX_SUCCESS && status != UX_SUCCESS)
+                        goto done;
+                }
+            }
+            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
+            {
+                status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
+                if (status == FX_SUCCESS)
+                {
+                    status = audio_stream_mp3(audio, &audio_file);
+                    fx_file_close(&audio_file);
 
                     if (status != FX_SUCCESS && status != UX_SUCCESS)
                         goto done;

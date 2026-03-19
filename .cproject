@@ -52,6 +52,7 @@
 									<listOptionValue builtIn="false" value="../FileX/Target"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/common/inc"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/ports/generic/inc"/>
+									<listOptionValue builtIn="false" value="../minimp3-master"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input.211155566" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input"/>
 							</tool>
@@ -86,6 +87,7 @@
 									<listOptionValue builtIn="false" value="../FileX/Target"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/common/inc"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/ports/generic/inc"/>
+									<listOptionValue builtIn="false" value="../minimp3-master"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1287414801" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
 							</tool>
@@ -173,6 +175,7 @@
 									<listOptionValue builtIn="false" value="../FileX/Target"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/common/inc"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/ports/generic/inc"/>
+									<listOptionValue builtIn="false" value="../minimp3-master"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input.902847215" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input"/>
 							</tool>
@@ -206,6 +209,7 @@
 									<listOptionValue builtIn="false" value="../FileX/Target"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/common/inc"/>
 									<listOptionValue builtIn="false" value="../Middlewares/ST/filex/ports/generic/inc"/>
+									<listOptionValue builtIn="false" value="../minimp3-master"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1417420977" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
 							</tool>

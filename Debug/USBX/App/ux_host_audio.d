@@ -12,7 +12,7 @@ USBX/App/ux_host_audio.o: ../USBX/App/ux_host_audio.c \
  ../Middlewares/ST/usbx/common/core/inc/ux_class_audio20.h \
  ../Middlewares/ST/filex/common/inc/fx_api.h \
  ../Middlewares/ST/filex/ports/generic/inc/fx_port.h \
- ../FileX/App/fx_user.h
+ ../FileX/App/fx_user.h ../minimp3-master/minimp3.h
 ../USBX/App/ux_host_audio.h:
 ../Middlewares/ST/usbx/common/core/inc/ux_api.h:
 ../Middlewares/ST/usbx/ports/generic/inc/ux_port.h:
@@ -28,3 +28,4 @@ USBX/App/ux_host_audio.o: ../USBX/App/ux_host_audio.c \
 ../Middlewares/ST/filex/common/inc/fx_api.h:
 ../Middlewares/ST/filex/ports/generic/inc/fx_port.h:
 ../FileX/App/fx_user.h:
+../minimp3-master/minimp3.h:
