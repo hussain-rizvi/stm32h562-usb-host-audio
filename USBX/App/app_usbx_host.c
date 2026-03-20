@@ -194,6 +194,8 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
       /* USER CODE BEGIN UX_DEVICE_REMOVAL */
       if ((UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
       {
+        /* Wake playback out of ISO wait quickly (do not rely only on 10 s timeout). */
+        audio_playback_usb_disconnect_notify();
         audio_speaker = UX_NULL;
         tx_event_flags_set(&audio_event_flags, 0, TX_AND);
       }
@@ -253,7 +255,7 @@ VOID ux_host_error_callback(UINT system_level, UINT system_context, UINT error_c
     case UX_DEVICE_ENUMERATION_FAILURE:
 
       /* USER CODE BEGIN UX_DEVICE_ENUMERATION_FAILURE */
-
+      audio_playback_usb_disconnect_notify();
       /* USER CODE END UX_DEVICE_ENUMERATION_FAILURE */
 
       break;
@@ -261,7 +263,7 @@ VOID ux_host_error_callback(UINT system_level, UINT system_context, UINT error_c
     case  UX_NO_DEVICE_CONNECTED:
 
       /* USER CODE BEGIN UX_NO_DEVICE_CONNECTED */
-
+      audio_playback_usb_disconnect_notify();
       /* USER CODE END UX_NO_DEVICE_CONNECTED */
 
       break;

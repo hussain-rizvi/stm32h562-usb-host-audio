@@ -68,6 +68,30 @@ typedef struct
 
 static TX_SEMAPHORE audio_xfer_semaphore;
 
+/* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
+static volatile UINT s_audio_playback_abort;
+
+/* Wait for USB ISO completion or disconnect — faster exit on unplug than a single long semaphore timeout. */
+static UINT audio_wait_xfer_done(VOID)
+{
+    ULONG t0 = tx_time_get();
+
+    while ((tx_time_get() - t0) < AUDIO_XFER_SEMAPHORE_TIMEOUT)
+    {
+        if (s_audio_playback_abort)
+            return UX_ERROR;
+        if (tx_semaphore_get(&audio_xfer_semaphore, TX_NO_WAIT) == TX_SUCCESS)
+            return UX_SUCCESS;
+        tx_thread_sleep(1);
+    }
+    return UX_ERROR;
+}
+
+VOID audio_playback_usb_disconnect_notify(VOID)
+{
+    s_audio_playback_abort = TX_TRUE;
+}
+
 /* MP3 decode uses large stack inside minimp3 (~15 KB). Keep I/O buffers & decoder out of thread stack. */
 #define MP3_READ_BUF_SIZE  4096
 static mp3dec_t s_mp3_decoder;
@@ -204,9 +228,9 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         if (in_flight_idx >= 0)
         {
-            status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
-            if (status != TX_SUCCESS)
-                return UX_ERROR;
+            status = audio_wait_xfer_done();
+            if (status != UX_SUCCESS)
+                return status;
         }
 
         audio_xfer[fill_idx].ux_host_class_audio_transfer_request_data_pointer = audio_buffer[fill_idx];
@@ -216,7 +240,10 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         status = ux_host_class_audio_write(audio, &audio_xfer[fill_idx]);
         if (status != UX_SUCCESS)
+        {
+            (void)tx_semaphore_get(&audio_xfer_semaphore, TX_NO_WAIT);
             return status;
+        }
 
         in_flight_idx = (INT)fill_idx;
         fill_idx = 1U - fill_idx;
@@ -225,9 +252,9 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
     if (in_flight_idx >= 0)
     {
-        status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
-        if (status != TX_SUCCESS)
-            return UX_ERROR;
+        status = audio_wait_xfer_done();
+        if (status != UX_SUCCESS)
+            return status;
     }
 
     return UX_SUCCESS;
@@ -346,9 +373,9 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
             if (in_flight_idx >= 0)
             {
-                status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
-                if (status != TX_SUCCESS)
-                    return UX_ERROR;
+                status = audio_wait_xfer_done();
+                if (status != UX_SUCCESS)
+                    return status;
             }
 
             audio_xfer[fill_idx].ux_host_class_audio_transfer_request_data_pointer = audio_buffer[fill_idx];
@@ -358,7 +385,10 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
             status = ux_host_class_audio_write(audio, &audio_xfer[fill_idx]);
             if (status != UX_SUCCESS)
+            {
+                (void)tx_semaphore_get(&audio_xfer_semaphore, TX_NO_WAIT);
                 return status;
+            }
 
             in_flight_idx = (INT)fill_idx;
             fill_idx = 1U - fill_idx;
@@ -368,9 +398,9 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
     if (in_flight_idx >= 0)
     {
-        status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
-        if (status != TX_SUCCESS)
-            return UX_ERROR;
+        status = audio_wait_xfer_done();
+        if (status != UX_SUCCESS)
+            return status;
     }
 
     return UX_SUCCESS;
@@ -389,6 +419,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     FX_FILE audio_file;
     WAV_INFO wav_info;
 
+    s_audio_playback_abort = TX_FALSE;
     tx_semaphore_create(&audio_xfer_semaphore, "audio_xfer_sem", 0);
 
     while (1)
@@ -435,7 +466,8 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     }
 
 done:
-    ux_host_class_audio_stop(audio);
+    (void)ux_host_class_audio_stop(audio);
+    s_audio_playback_abort = TX_FALSE;
     tx_semaphore_delete(&audio_xfer_semaphore);
 }
 
