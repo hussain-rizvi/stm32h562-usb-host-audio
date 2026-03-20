@@ -68,6 +68,12 @@ typedef struct
 
 static TX_SEMAPHORE audio_xfer_semaphore;
 
+/* MP3 decode uses large stack inside minimp3 (~15 KB). Keep I/O buffers & decoder out of thread stack. */
+#define MP3_READ_BUF_SIZE  4096
+static mp3dec_t s_mp3_decoder;
+static UCHAR s_mp3_read_buf[MP3_READ_BUF_SIZE];
+static mp3d_sample_t s_mp3_pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
+
 static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
     tx_semaphore_put(&audio_xfer_semaphore);
@@ -253,14 +259,11 @@ static UINT str_ends_with_mp3(CHAR *name)
             (name[len-1] == '3'));
 }
 
-#define MP3_READ_BUF_SIZE  4096
-
 static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 {
-    mp3dec_t dec;
     mp3dec_frame_info_t info;
-    UCHAR mp3_buf[MP3_READ_BUF_SIZE];
-    mp3d_sample_t pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    UCHAR *mp3_buf = s_mp3_read_buf;
+    mp3d_sample_t *pcm_buf = s_mp3_pcm_buf;
     ULONG mp3_size = 0;
     UINT sampling_set = 0;
     UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
@@ -278,14 +281,14 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
     static UCHAR audio_buffer[2][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
     static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_xfer[2];
 
-    mp3dec_init(&dec);
+    mp3dec_init(&s_mp3_decoder);
 
     while (1)
     {
         if (mp3_size < 1440)
         {
             ULONG to_read = MP3_READ_BUF_SIZE - mp3_size;
-            status = fx_file_read(file, mp3_buf + mp3_size, to_read, &bytes_read);
+            status = fx_file_read(file, s_mp3_read_buf + mp3_size, to_read, &bytes_read);
             if (status != FX_SUCCESS)
                 return UX_ERROR;
             mp3_size += bytes_read;
@@ -293,7 +296,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
                 break;
         }
 
-        samples = mp3dec_decode_frame(&dec, (const uint8_t *)mp3_buf, mp3_size, pcm_buf, &info);
+        samples = mp3dec_decode_frame(&s_mp3_decoder, (const uint8_t *)mp3_buf, mp3_size, pcm_buf, &info);
         consumed = info.frame_bytes;
 
         if (samples <= 0)
@@ -302,7 +305,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
                 break;
             if (mp3_size == MP3_READ_BUF_SIZE)
             {
-                memmove(mp3_buf, mp3_buf + 1, mp3_size - 1);
+                memmove(s_mp3_read_buf, s_mp3_read_buf + 1, mp3_size - 1);
                 mp3_size--;
             }
             else
@@ -310,7 +313,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
             continue;
         }
 
-        memmove(mp3_buf, mp3_buf + consumed, mp3_size - consumed);
+        memmove(s_mp3_read_buf, s_mp3_read_buf + consumed, mp3_size - consumed);
         mp3_size -= consumed;
 
         pcm_bytes = samples * (int)sizeof(mp3d_sample_t);
