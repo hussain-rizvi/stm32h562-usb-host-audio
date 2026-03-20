@@ -45,7 +45,7 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define AUDIO_XFER_SEMAPHORE_TIMEOUT  (10 * TX_TIMER_TICKS_PER_SECOND)  /* 10 seconds */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -198,7 +198,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         if (in_flight_idx >= 0)
         {
-            status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+            status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
             if (status != TX_SUCCESS)
                 return UX_ERROR;
         }
@@ -219,7 +219,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
     if (in_flight_idx >= 0)
     {
-        status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+        status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
         if (status != TX_SUCCESS)
             return UX_ERROR;
     }
@@ -343,7 +343,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
             if (in_flight_idx >= 0)
             {
-                status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+                status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
                 if (status != TX_SUCCESS)
                     return UX_ERROR;
             }
@@ -365,7 +365,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
     if (in_flight_idx >= 0)
     {
-        status = tx_semaphore_get(&audio_xfer_semaphore, TX_WAIT_FOREVER);
+        status = tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_SEMAPHORE_TIMEOUT);
         if (status != TX_SUCCESS)
             return UX_ERROR;
     }
