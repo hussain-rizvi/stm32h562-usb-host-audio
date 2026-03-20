@@ -23,7 +23,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "tx_api.h"
+#include "stm32h5xx_hal_sd.h"
+extern SD_HandleTypeDef hsd1;
+UINT audio_playback_is_active(VOID);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,11 +36,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* Main thread stack size */
-#define FX_APP_THREAD_STACK_SIZE         2048
+#define FX_APP_THREAD_STACK_SIZE         3072
 /* Main thread priority */
 #define FX_APP_THREAD_PRIO               10
 /* USER CODE BEGIN PD */
-
+/* Delay between SD mount attempts when no card / not ready (allows insert-after-boot). */
+#ifndef SD_MOUNT_RETRY_DELAY_TICKS
+#define SD_MOUNT_RETRY_DELAY_TICKS  \
+    ((TX_TIMER_TICKS_PER_SECOND / 2U) != 0U ? (TX_TIMER_TICKS_PER_SECOND / 2U) : 1U)
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -134,24 +141,46 @@ UINT MX_FileX_Init(VOID *memory_ptr)
   UINT sd_status = FX_SUCCESS;
 
 /* USER CODE BEGIN fx_app_thread_entry 0*/
+  TX_PARAMETER_NOT_USED(thread_input);
 
 /* USER CODE END fx_app_thread_entry 0*/
 
-/* Open the SD disk driver */
-  sd_status =  fx_media_open(&sdio_disk, FX_SD_VOLUME_NAME, fx_stm32_sd_driver, (VOID *)FX_NULL, (VOID *) fx_sd_media_memory, sizeof(fx_sd_media_memory));
-
-/* Check the media open sd_status */
-  if (sd_status != FX_SUCCESS)
+  /* Mount → signal ready → on physical removal close media and clear ready (remount), but never
+   * call fx_media_close while USB audio is actively reading from SD. */
+  for (;;)
   {
-     /* USER CODE BEGIN SD DRIVER get info error */
-    while(1);
-    /* USER CODE END SD DRIVER get info error */
-  }
+    /* Open the SD disk driver — retry until success (no card at boot, or after remove). */
+    for (;;)
+    {
+      sd_status = fx_media_open(&sdio_disk, FX_SD_VOLUME_NAME, fx_stm32_sd_driver, (VOID *)FX_NULL,
+                                (VOID *)fx_sd_media_memory, sizeof(fx_sd_media_memory));
+      if (sd_status == FX_SUCCESS)
+      {
+        break;
+      }
+      tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+    }
 
 /* USER CODE BEGIN fx_app_thread_entry 1*/
-  tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
+    tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
+
+    for (;;)
+    {
+      tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+      if (audio_playback_is_active())
+      {
+        continue;
+      }
+      if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_DISCONNECTED)
+      {
+        (void)fx_media_close(&sdio_disk);
+        tx_event_flags_set(&sd_event_flags, (ULONG)(~SD_FLAG_MEDIA_READY), TX_AND);
+        break;
+      }
+    }
 /* USER CODE END fx_app_thread_entry 1*/
   }
+}
 
 /* USER CODE BEGIN 1 */
 

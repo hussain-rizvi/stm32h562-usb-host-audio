@@ -71,6 +71,9 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 /* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
 static volatile UINT s_audio_playback_abort;
 
+/* Set for whole audio_playback_wav_files() so FileX can defer fx_media_close until playback is idle. */
+static volatile UINT s_audio_playback_active;
+
 /* Wait for USB ISO completion or disconnect — faster exit on unplug than a single long semaphore timeout. */
 static UINT audio_wait_xfer_done(VOID)
 {
@@ -90,6 +93,11 @@ static UINT audio_wait_xfer_done(VOID)
 VOID audio_playback_usb_disconnect_notify(VOID)
 {
     s_audio_playback_abort = TX_TRUE;
+}
+
+UINT audio_playback_is_active(VOID)
+{
+    return s_audio_playback_active;
 }
 
 /* MP3 decode uses large stack inside minimp3 (~15 KB). Keep I/O buffers & decoder out of thread stack. */
@@ -420,6 +428,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     WAV_INFO wav_info;
 
     s_audio_playback_abort = TX_FALSE;
+    s_audio_playback_active = TX_TRUE;
     tx_semaphore_create(&audio_xfer_semaphore, "audio_xfer_sem", 0);
 
     while (1)
@@ -466,6 +475,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     }
 
 done:
+    s_audio_playback_active = TX_FALSE;
     (void)ux_host_class_audio_stop(audio);
     s_audio_playback_abort = TX_FALSE;
     tx_semaphore_delete(&audio_xfer_semaphore);

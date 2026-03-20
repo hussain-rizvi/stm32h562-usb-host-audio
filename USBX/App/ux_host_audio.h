@@ -55,6 +55,8 @@ extern "C" {
 VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media);
 /* Call from USB host removal path so playback exits waits promptly (plug/unplug safe). */
 VOID audio_playback_usb_disconnect_notify(VOID);
+/* TX_TRUE while audio_playback_wav_files() is using the SD media (defer remount/close). */
+UINT audio_playback_is_active(VOID);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
