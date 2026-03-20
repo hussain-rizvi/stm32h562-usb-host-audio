@@ -419,7 +419,8 @@ static void decode_file(const char *input_file_name, const unsigned char *buf_re
         psnr = 99.0;
     else
         psnr = 10.0*log10(((double)0x7fff*0x7fff)/MSE);
-    printf("rate=%d samples=%d max_diff=%d PSNR=%f\n", info.hz, total_samples, maxdiff, psnr);
+    /* Integer PSNR avoids newlib-nano %f (requires -u _printf_float) — value still compared below. */
+    printf("rate=%d samples=%d max_diff=%d PSNR=%d\n", info.hz, total_samples, maxdiff, (int)(psnr + 0.5));
     if (psnr < 96)
     {
         printf("error: PSNR compliance failed\n");
