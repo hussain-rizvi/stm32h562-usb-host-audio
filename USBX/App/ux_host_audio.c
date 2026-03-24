@@ -303,7 +303,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
     packet_size = ux_host_class_audio_packet_size_get(audio);
     if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
-        packet_size = AUDIO_MAX_PACKET_SIZE;
+        return UX_ERROR;  /* unsupported format — skip file */
 
     drain_reset();
     ring_sem_flush();
@@ -447,7 +447,10 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
                 goto mp3_done;
             packet_size = ux_host_class_audio_packet_size_get(audio);
             if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
-                packet_size = AUDIO_MAX_PACKET_SIZE;
+            {
+                status = UX_ERROR;  /* unsupported format — skip file */
+                goto mp3_done;
+            }
             sampling_set = 1;
         }
 
