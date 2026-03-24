@@ -367,7 +367,7 @@ static UINT str_ends_with_wav(CHAR *name)
         len++;
     if (len < 4)
         return 0;
-    return ((name[len-4] == '.' || name[len-4] == '.') &&
+    return ((name[len-4] == '.') &&
             (name[len-3] == 'w' || name[len-3] == 'W') &&
             (name[len-2] == 'a' || name[len-2] == 'A') &&
             (name[len-1] == 'v' || name[len-1] == 'V'));
