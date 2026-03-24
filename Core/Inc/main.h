@@ -53,13 +53,20 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+uint8_t SD_CardIsPresent(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define SD_EN_Pin GPIO_PIN_14
+#define SD_EN_GPIO_Port GPIOB
+#define SD_CD_Pin GPIO_PIN_7
+#define SD_CD_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
-
+/** Override if your CD net is active-high when a card is inserted (default: low = inserted). */
+#ifndef SD_CD_INSERTED_LEVEL
+#define SD_CD_INSERTED_LEVEL GPIO_PIN_RESET
+#endif
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

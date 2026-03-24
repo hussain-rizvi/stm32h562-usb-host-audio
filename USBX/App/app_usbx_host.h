@@ -42,7 +42,6 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 
-/* minimp3 uses ~15 KB stack in mp3dec_decode_frame(); 4 KB was unsafe for MP3. */
 #define UX_HOST_APP_THREAD_STACK_SIZE   24576
 #define UX_HOST_APP_THREAD_PRIO         10
 /* USER CODE BEGIN EC */

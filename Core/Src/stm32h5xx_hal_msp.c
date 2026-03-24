@@ -101,29 +101,30 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
     /* Peripheral clock enable */
     __HAL_RCC_SDMMC1_CLK_ENABLE();
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
     /**SDMMC1 GPIO Configuration
-    PB2     ------> SDMMC1_CMD
-    PB13     ------> SDMMC1_D0
+    PC8     ------> SDMMC1_D0
     PC9     ------> SDMMC1_D1
     PC10     ------> SDMMC1_D2
     PC11     ------> SDMMC1_D3
     PC12     ------> SDMMC1_CK
+    PD2     ------> SDMMC1_CMD
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_13;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF12_SDMMC1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12;
+    GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+                          |GPIO_PIN_12;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF12_SDMMC1;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_2;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF12_SDMMC1;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* SDMMC1 interrupt Init */
     HAL_NVIC_SetPriority(SDMMC1_IRQn, 6, 0);
@@ -153,16 +154,17 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef* hsd)
     __HAL_RCC_SDMMC1_CLK_DISABLE();
 
     /**SDMMC1 GPIO Configuration
-    PB2     ------> SDMMC1_CMD
-    PB13     ------> SDMMC1_D0
+    PC8     ------> SDMMC1_D0
     PC9     ------> SDMMC1_D1
     PC10     ------> SDMMC1_D2
     PC11     ------> SDMMC1_D3
     PC12     ------> SDMMC1_CK
+    PD2     ------> SDMMC1_CMD
     */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_2|GPIO_PIN_13);
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+                          |GPIO_PIN_12);
 
-    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12);
+    HAL_GPIO_DeInit(GPIOD, GPIO_PIN_2);
 
     /* SDMMC1 interrupt DeInit */
     HAL_NVIC_DisableIRQ(SDMMC1_IRQn);
@@ -198,23 +200,23 @@ void HAL_HCD_MspInit(HCD_HandleTypeDef* hhcd)
       Error_Handler();
     }
 
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    /**USB GPIO Configuration
-    PA8     ------> USB_SOF
-    PA11     ------> USB_DM
-    PA12     ------> USB_DP
-    */
-    GPIO_InitStruct.Pin = GPIO_PIN_8;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF10_USB;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
     /* Enable VDDUSB */
     HAL_PWREx_EnableVddUSB();
     /* Peripheral clock enable */
     __HAL_RCC_USB_CLK_ENABLE();
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**USB_DRD_FS GPIO Configuration
+    PA11     ------> USB_DRD_FS_DM
+    PA12     ------> USB_DRD_FS_DP
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF10_USB;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
     /* USB_DRD_FS interrupt Init */
     HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
@@ -242,12 +244,11 @@ void HAL_HCD_MspDeInit(HCD_HandleTypeDef* hhcd)
     /* Peripheral clock disable */
     __HAL_RCC_USB_CLK_DISABLE();
 
-    /**USB GPIO Configuration
-    PA8     ------> USB_SOF
-    PA11     ------> USB_DM
-    PA12     ------> USB_DP
+    /**USB_DRD_FS GPIO Configuration
+    PA11     ------> USB_DRD_FS_DM
+    PA12     ------> USB_DRD_FS_DP
     */
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_8|GPIO_PIN_11|GPIO_PIN_12);
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11|GPIO_PIN_12);
 
     /* USB_DRD_FS interrupt DeInit */
     HAL_NVIC_DisableIRQ(USB_DRD_FS_IRQn);
