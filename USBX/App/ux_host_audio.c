@@ -551,7 +551,13 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
 
 done:
     s_audio_playback_active = TX_FALSE;
-    (void)ux_host_class_audio_stop(audio);
+    /* Do NOT call ux_host_class_audio_stop when:
+       - s_audio_playback_abort is set: USBX already freed the instance on disconnect.
+       - isochronous_endpoint is NULL: alt setting 0 was never activated (no transfers
+         were ever submitted), so abort inside USBX dereferences a NULL endpoint. */
+    if (!s_audio_playback_abort &&
+        audio->ux_host_class_audio_isochronous_endpoint != UX_NULL)
+        (void)ux_host_class_audio_stop(audio);
     s_audio_playback_abort = TX_FALSE;
     tx_semaphore_delete(&audio_xfer_semaphore);
 }

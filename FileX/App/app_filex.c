@@ -177,8 +177,8 @@ UINT MX_FileX_Init(VOID *memory_ptr)
     for (;;)
     {
       tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
-      if (SD_CardIsPresent() == 0U)
-      {
+//      if (SD_CardIsPresent() == 0U)
+//      {
         if (audio_playback_is_active())
         {
           continue;
@@ -186,7 +186,7 @@ UINT MX_FileX_Init(VOID *memory_ptr)
         (void)fx_media_close(&sdio_disk);
         tx_event_flags_set(&sd_event_flags, (ULONG)(~SD_FLAG_MEDIA_READY), TX_AND);
         break;
-      }
+//      }
     }
   }
 

@@ -176,12 +176,22 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
         if (_ux_host_class_audio_subclass_get(audio_instance) ==
             UX_HOST_CLASS_AUDIO_SUBCLASS_STREAMING)
         {
-          UX_ENDPOINT *ep = audio_instance->ux_host_class_audio_isochronous_endpoint;
-          if ((ep != UX_NULL) &&
-              ((ep->ux_endpoint_descriptor.bEndpointAddress & 0x80U) == 0U))
+          /* Only accept the first streaming instance — the callback can fire multiple
+             times (once per streaming interface: speaker + mic, or per alternate setting).
+             Overwriting audio_speaker with a second instance (e.g. a mic or alt-0
+             interface) causes a HardFault when stop is called on an instance with no
+             active endpoint. */
+          if (audio_speaker == UX_NULL)
           {
-            audio_speaker = audio_instance;
-            tx_event_flags_set(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED, TX_OR);
+            UX_ENDPOINT *ep = audio_instance->ux_host_class_audio_isochronous_endpoint;
+            /* Accept if ep is NULL (alt setting 0 — real endpoint appears after
+               sampling_set) or confirmed OUT (bit7 = 0). Reject confirmed IN (mic). */
+            if (ep == UX_NULL ||
+                ((ep->ux_endpoint_descriptor.bEndpointAddress & 0x80U) == 0U))
+            {
+              audio_speaker = audio_instance;
+              tx_event_flags_set(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED, TX_OR);
+            }
           }
         }
       }
@@ -320,6 +330,9 @@ UINT MX_USBX_Host_Stack_Init(void)
     return UX_ERROR;
     /* USER CODE END USBX_HOST_STACK_HCD_REGISTER_ERROR */
   }
+
+  /* Start the USB host controller — drives VBUS, enables SOF and connect interrupts. */
+  HAL_HCD_Start(&hhcd_USB_DRD_FS);
   /* USER CODE BEGIN MX_USBX_Host_Stack_Init_PreTreatment_1 */
   /* USER CODE END MX_USBX_Host_Stack_Init_PreTreatment_1 */
 
