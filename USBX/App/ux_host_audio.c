@@ -510,6 +510,13 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     {
         status = fx_directory_first_entry_find(media, entry_name);
 
+        /* If the directory scan itself fails (SD removed, media error) exit
+           cleanly. Without this, the outer while(1) spins forever, s_audio_
+           playback_active never clears, and the FileX thread deadlocks waiting
+           for audio_playback_is_active() to return false. */
+        if (status != FX_SUCCESS && status != FX_NO_MORE_ENTRIES)
+            goto done;
+
         while (status == FX_SUCCESS)
         {
             fx_directory_information_get(media, entry_name, &file_attributes,
@@ -519,30 +526,28 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
             if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
             {
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
+                /* File found in directory but cannot open = SD removed or IO error.
+                   Must goto done — silently skipping would loop forever on cached
+                   directory entries, keeping s_audio_playback_active TRUE and
+                   deadlocking the FileX thread. */
+                if (status != FX_SUCCESS)
+                    goto done;
+                status = wav_parse_header(&audio_file, &wav_info);
                 if (status == FX_SUCCESS)
-                {
-                    status = wav_parse_header(&audio_file, &wav_info);
-                    if (status == FX_SUCCESS)
-                    {
-                        status = audio_stream_wav(audio, &audio_file, &wav_info);
-                    }
-                    fx_file_close(&audio_file);
-
-                    if (status != FX_SUCCESS && status != UX_SUCCESS)
-                        goto done;
-                }
+                    status = audio_stream_wav(audio, &audio_file, &wav_info);
+                fx_file_close(&audio_file);
+                if (status != FX_SUCCESS && status != UX_SUCCESS)
+                    goto done;
             }
             else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
             {
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
-                if (status == FX_SUCCESS)
-                {
-                    status = audio_stream_mp3(audio, &audio_file);
-                    fx_file_close(&audio_file);
-
-                    if (status != FX_SUCCESS && status != UX_SUCCESS)
-                        goto done;
-                }
+                if (status != FX_SUCCESS)
+                    goto done;
+                status = audio_stream_mp3(audio, &audio_file);
+                fx_file_close(&audio_file);
+                if (status != FX_SUCCESS && status != UX_SUCCESS)
+                    goto done;
             }
 
             status = fx_directory_next_entry_find(media, entry_name);

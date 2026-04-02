@@ -158,6 +158,14 @@ UINT MX_FileX_Init(VOID *memory_ptr)
         sd_status = FX_IO_ERROR;
         break;
       }
+      /* FX_STM32_SD_INIT=0: HAL_SD_Init is the app's responsibility.
+         DeInit first to reset handle state (may be HAL_SD_STATE_ERROR from a
+         previous failed init when no card was present), then re-init so the
+         newly inserted card is fully recognized. */
+      extern SD_HandleTypeDef hsd1;
+      HAL_SD_DeInit(&hsd1);
+      HAL_SD_Init(&hsd1);
+
       sd_status = fx_media_open(&sdio_disk, FX_SD_VOLUME_NAME, fx_stm32_sd_driver, (VOID *)FX_NULL,
                                 (VOID *)fx_sd_media_memory, sizeof(fx_sd_media_memory));
       if (sd_status == FX_SUCCESS)
@@ -174,20 +182,10 @@ UINT MX_FileX_Init(VOID *memory_ptr)
 
     tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
 
+    /* SD removal is now handled by GPIO interrupt (EXTI7) in main.c which
+       calls NVIC_SystemReset() instantly. Nothing to do here. */
     for (;;)
-    {
-      tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
-//      if (SD_CardIsPresent() == 0U)
-//      {
-        if (audio_playback_is_active())
-        {
-          continue;
-        }
-        (void)fx_media_close(&sdio_disk);
-        tx_event_flags_set(&sd_event_flags, (ULONG)(~SD_FLAG_MEDIA_READY), TX_AND);
-        break;
-//      }
-    }
+      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
   }
 
 /* USER CODE END fx_app_thread_entry 0*/

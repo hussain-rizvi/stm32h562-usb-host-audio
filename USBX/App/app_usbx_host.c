@@ -124,20 +124,19 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
 
   MX_USBX_Host_Stack_Init();
 
-  /* Wait for SD card media to be ready */
-  {
-    ULONG sd_flags;
-    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
-    tx_event_flags_get(&sd_event_flags, 0x01UL,
-                       TX_AND, &sd_flags, TX_WAIT_FOREVER);
-  }
-
   while (1)
   {
     ULONG actual_flags;
+    ULONG sd_flags;
+    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
 
+    /* Wait for speaker — re-checked every iteration so re-plug works too. */
     tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
                        TX_AND, &actual_flags, TX_WAIT_FOREVER);
+
+    /* Wait for SD — re-checked every iteration so hot-insert after removal works. */
+    tx_event_flags_get(&sd_event_flags, 0x01UL,
+                       TX_AND, &sd_flags, TX_WAIT_FOREVER);
 
     if (audio_speaker != UX_NULL)
     {
@@ -204,10 +203,7 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
       /* USER CODE BEGIN UX_DEVICE_REMOVAL */
       if ((UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
       {
-        /* Wake playback out of ISO wait quickly (do not rely only on 10 s timeout). */
-        audio_playback_usb_disconnect_notify();
-        audio_speaker = UX_NULL;
-        tx_event_flags_set(&audio_event_flags, 0, TX_AND);
+        NVIC_SystemReset();
       }
       /* USER CODE END UX_DEVICE_REMOVAL */
 

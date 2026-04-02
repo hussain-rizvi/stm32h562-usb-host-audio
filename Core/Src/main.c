@@ -247,10 +247,9 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
   hsd1.Init.ClockDiv = 0;
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* Ignore failure here — card may not be inserted at boot.
+     The FileX thread calls HAL_SD_Init before each mount attempt. */
+  HAL_SD_Init(&hsd1);
   /* USER CODE BEGIN SDMMC1_Init 2 */
 
   /* USER CODE END SDMMC1_Init 2 */
@@ -319,11 +318,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(SD_EN_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SD_CD_Pin */
+  /*Configure GPIO pin : SD_CD_Pin — interrupt on rising edge (card removed = pin goes HIGH) */
   GPIO_InitStruct.Pin = SD_CD_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
+  HAL_NVIC_SetPriority(EXTI7_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -331,10 +332,19 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+uint8_t sd_cd;
 uint8_t SD_CardIsPresent(void)
 {
+	sd_cd = HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin);
   return (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == SD_CD_INSERTED_LEVEL) ? 1U : 0U;
+}
+
+/* SD card removal detected instantly via GPIO interrupt — no polling delay,
+   no SDMMC timeout wait. Rising edge = SD_CD goes HIGH = card removed. */
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == SD_CD_Pin)
+    NVIC_SystemReset();
 }
 
 /* USER CODE END 4 */

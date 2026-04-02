@@ -176,6 +176,14 @@ void TIM2_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles EXTI Line7 interrupt (SD card detect).
+  */
+void EXTI7_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
+}
+
+/**
   * @brief This function handles USB FS global interrupt.
   */
 void USB_DRD_FS_IRQHandler(void)
