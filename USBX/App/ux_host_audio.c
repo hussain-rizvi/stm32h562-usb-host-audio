@@ -25,6 +25,12 @@
 /* USER CODE BEGIN Includes */
 #include "tx_api.h"
 #include "fx_api.h"
+/* minimp3 inner decode loops (MDCT/QMF) must run fast regardless of project
+   build config.  -O0 (Debug) makes one frame take ~80 ms on Cortex-M33 —
+   far longer than the 26 ms frame duration — causing guaranteed underrun.
+   -Os (Release) sacrifices throughput for size on exactly the wrong code.
+   Force -O2 for this translation unit only. */
+#pragma GCC optimize("O2")
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_NO_SIMD
 #include "minimp3.h"
