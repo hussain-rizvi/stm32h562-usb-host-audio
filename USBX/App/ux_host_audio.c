@@ -251,8 +251,17 @@ static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
  * Safety: isochronous completions are FIFO, so slot[wr] is always free when the thread
  * reaches it (RING_SLOTS > INFLIGHT guarantees no wrap-around overlap).
  */
-#define AUDIO_RING_SLOTS  8
-#define AUDIO_INFLIGHT    4
+/*
+ * Ring sizing for MP3:
+ *   minimp3 no-SIMD on Cortex-M33 takes ~15-20 ms to decode one 26 ms frame.
+ *   AUDIO_INFLIGHT must exceed that worst-case decode gap so the USB pipeline
+ *   never runs dry between frames.  At 44.1 kHz stereo 16-bit the packet size
+ *   is ~176 bytes (= 1 ms of audio), so AUDIO_INFLIGHT=24 gives ~24 ms headroom.
+ *   AUDIO_RING_SLOTS must be > AUDIO_INFLIGHT to avoid wrap-around overlap.
+ *   RAM cost: 32 × 256 = 8 KB.
+ */
+#define AUDIO_RING_SLOTS  32
+#define AUDIO_INFLIGHT    24
 
 static UCHAR audio_ring_buf[AUDIO_RING_SLOTS][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
 static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_ring_xfer[AUDIO_RING_SLOTS];
@@ -396,23 +405,28 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
     UINT  wr          = 0;
     UINT  inflight    = 0;
     UINT  status      = UX_SUCCESS;
-    ULONG bytes_read;
     int   consumed, samples, pcm_bytes, pcm_offset, to_copy;
 
     mp3dec_init(&s_mp3_decoder);
+    drain_reset();
     ring_sem_flush();
+
+    UINT mp3_eof = 0;
 
     while (1)
     {
-        /* Refill the MP3 input window whenever it drops below one max frame. */
-        if (mp3_size < 1440)
+        /* Refill the MP3 input window whenever it drops below one max frame.
+           drain_read buffers 4 KB chunks from SD so the refill rarely stalls
+           on a raw fx_file_read — same benefit the WAV path gets. */
+        if (!mp3_eof && mp3_size < 1440)
         {
             ULONG to_read = MP3_READ_BUF_SIZE - mp3_size;
-            status = fx_file_read(file, s_mp3_read_buf + mp3_size, to_read, &bytes_read);
-            if (status != FX_SUCCESS)
-                goto mp3_done;
-            mp3_size += bytes_read;
-            if (bytes_read == 0 && mp3_size == 0)
+            ULONG nr = 0;
+            drain_read(file, s_mp3_read_buf + mp3_size, to_read, &nr);
+            mp3_size += nr;
+            if (nr < to_read)
+                mp3_eof = 1;  /* short read → EOF, drain remaining buffer */
+            if (mp3_size == 0)
                 break;
         }
 
@@ -435,7 +449,8 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
         memmove(s_mp3_read_buf, s_mp3_read_buf + consumed, mp3_size - consumed);
         mp3_size -= (ULONG)consumed;
 
-        pcm_bytes = samples * (int)sizeof(mp3d_sample_t);
+        /* samples is per-channel; multiply by channels for total PCM bytes. */
+        pcm_bytes = samples * info.channels * (int)sizeof(mp3d_sample_t);
 
         if (!sampling_set)
         {
