@@ -438,23 +438,28 @@ void sai_dma_msp_setup(SAI_HandleTypeDef *hsai)
     node_cfg.Init.SrcBurstLength                   = 1;
     node_cfg.Init.DestBurstLength                  = 1;
     node_cfg.Init.TransferAllocatedPort            = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT1;
-    node_cfg.Init.TransferEventMode                = DMA_TCEM_LAST_LL_ITEM_TRANSFER;
-    node_cfg.Init.Mode                             = DMA_LINKEDLIST_CIRCULAR;
+    node_cfg.Init.TransferEventMode                = DMA_TCEM_EACH_LL_ITEM_TRANSFER;
+    node_cfg.Init.Mode                             = DMA_NORMAL;
     node_cfg.TriggerConfig.TriggerPolarity         = DMA_TRIG_POLARITY_MASKED;
     node_cfg.DataHandlingConfig.DataExchange       = DMA_EXCHANGE_NONE;
     node_cfg.DataHandlingConfig.DataAlignment      = DMA_DATA_RIGHTALIGN_ZEROPADDED;
-    HAL_DMAEx_List_BuildNode(&node_cfg, &sai_dma_node);
-    HAL_DMAEx_List_InsertNode(&sai_dma_queue, NULL, &sai_dma_node);
-    HAL_DMAEx_List_SetCircularModeConfig(&sai_dma_queue, &sai_dma_node);
+    if (HAL_DMAEx_List_BuildNode(&node_cfg, &sai_dma_node) != HAL_OK)
+        Error_Handler();
+    if (HAL_DMAEx_List_InsertNode(&sai_dma_queue, NULL, &sai_dma_node) != HAL_OK)
+        Error_Handler();
+    if (HAL_DMAEx_List_SetCircularModeConfig(&sai_dma_queue, &sai_dma_node) != HAL_OK)
+        Error_Handler();
 
     hdma_sai1_a.Instance                         = GPDMA1_Channel0;
     hdma_sai1_a.InitLinkedList.Priority          = DMA_HIGH_PRIORITY;
     hdma_sai1_a.InitLinkedList.LinkStepMode      = DMA_LSM_FULL_EXECUTION;
     hdma_sai1_a.InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
-    hdma_sai1_a.InitLinkedList.TransferEventMode = DMA_TCEM_LAST_LL_ITEM_TRANSFER;
+    hdma_sai1_a.InitLinkedList.TransferEventMode = DMA_TCEM_EACH_LL_ITEM_TRANSFER;
     hdma_sai1_a.InitLinkedList.LinkedListMode    = DMA_LINKEDLIST_CIRCULAR;
-    HAL_DMAEx_List_Init(&hdma_sai1_a);
-    HAL_DMAEx_List_LinkQ(&hdma_sai1_a, &sai_dma_queue);
+    if (HAL_DMAEx_List_Init(&hdma_sai1_a) != HAL_OK)
+        Error_Handler();
+    if (HAL_DMAEx_List_LinkQ(&hdma_sai1_a, &sai_dma_queue) != HAL_OK)
+        Error_Handler();
     __HAL_LINKDMA(hsai, hdmatx, hdma_sai1_a);
 
     HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 4, 0);

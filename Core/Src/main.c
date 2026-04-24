@@ -114,6 +114,7 @@ int main(void)
 #ifdef AUDIO_OUTPUT_SAI
   extern void sai_dma_msp_setup(SAI_HandleTypeDef *hsai);
   sai_dma_msp_setup(&hsai_BlockA1);
+  tad5112_init(&hi2c1);
 #endif
   /* USER CODE END 2 */
 
@@ -317,16 +318,16 @@ static void MX_SAI1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SAI1_Init 2 */
-  /* Switch SAI1 clock to PLL2P (135.2 MHz) for better sample-rate accuracy.
-     PLL2: CSI/1 × 169 / 5 = 135.2 MHz  (VCO = 676 MHz, VCIRANGE_2, WIDE)
+  /* Safety net: ensure SAI1 is on PLL2P (135.2 MHz) after CubeMX MspInit runs.
+     CubeMX must be set to SAI1→PLL2P with PLL2: HSE/2×169/5 (VCO=676 MHz).
+     If CubeMX correctly generates PLL2P in MspInit, this block is a no-op.
      48 kHz → MCKDIV=11 → 48011 Hz (+0.024%)
-     44.1 kHz → MCKDIV=12 → 44010 Hz (−0.204%)
-     CubeMX currently selects PLL1Q (250 MHz) giving +1.74% at 48 kHz. */
+     44.1 kHz → MCKDIV=12 → 44010 Hz (−0.204%) */
   {
     RCC_PeriphCLKInitTypeDef clk = {0};
     clk.PeriphClockSelection      = RCC_PERIPHCLK_SAI1;
-    clk.PLL2.PLL2Source           = RCC_PLL2_SOURCE_CSI;
-    clk.PLL2.PLL2M                = 1;
+    clk.PLL2.PLL2Source           = RCC_PLL2_SOURCE_HSE;
+    clk.PLL2.PLL2M                = 2;
     clk.PLL2.PLL2N                = 169;
     clk.PLL2.PLL2P                = 5;
     clk.PLL2.PLL2Q                = 2;
@@ -338,7 +339,7 @@ static void MX_SAI1_Init(void)
     clk.Sai1ClockSelection        = RCC_SAI1CLKSOURCE_PLL2P;
     if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK)
       Error_Handler();
-    /* Re-run HAL_SAI_Init (not MspInit) to recalculate MCKDIV for 135.2 MHz */
+    /* Recalculate MCKDIV for the actual 135.2 MHz clock */
     if (HAL_SAI_Init(&hsai_BlockA1) != HAL_OK)
       Error_Handler();
   }

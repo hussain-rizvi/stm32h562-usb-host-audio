@@ -171,6 +171,7 @@ static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 #ifdef AUDIO_OUTPUT_SAI
 
 extern SAI_HandleTypeDef hsai_BlockA1;
+extern DMA_HandleTypeDef hdma_sai1_a;
 
 /* DMA ping-pong: two halves, each SAI_HALF_SAMPLES stereo 32-bit samples.
    SAI is configured as SAI_PROTOCOL_DATASIZE_32BIT → BCLK/FSYNC = 64.
@@ -211,19 +212,24 @@ static VOID sai_sem_flush(VOID)
 static HAL_StatusTypeDef sai_reconfigure(ULONG sample_rate)
 {
     uint32_t freq;
+    uint32_t nodiv;
     switch (sample_rate)
     {
-        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  break;
-        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; break;
-        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; break;
-        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; break;
-        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; break;
-        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; break;
-        default:     freq = SAI_AUDIO_FREQUENCY_48K; break;
+        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        /* 32 kHz: NODIV=0 → HAL picks MCKDIV=16 → 33008 Hz (+3.15%, audible).
+           NODIV=1 uses direct BCLK divider (÷FRL=64): MCKDIV=66 → 32009 Hz (+0.027%). */
+        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; nodiv = SAI_MASTERDIVIDER_DISABLE; break;
+        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        default:     freq = SAI_AUDIO_FREQUENCY_48K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
     }
-    if (hsai_BlockA1.Init.AudioFrequency == freq)
+    if (hsai_BlockA1.Init.AudioFrequency == freq &&
+        hsai_BlockA1.Init.NoDivider      == nodiv)
         return HAL_OK;
     hsai_BlockA1.Init.AudioFrequency = freq;
+    hsai_BlockA1.Init.NoDivider      = nodiv;
     return HAL_SAI_Init(&hsai_BlockA1);
 }
 
@@ -307,6 +313,21 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
     return (written > 0U) ? TX_TRUE : TX_FALSE;
 }
 
+/* Diagnostic capture: halts in Error_Handler so the debugger can inspect
+   g_sai_tx_result, hsai_BlockA1.ErrorCode, hdma_sai1_a.State/ErrorCode,
+   and hdma_sai1_a.LinkedListQueue to identify the exact failure mode. */
+static volatile HAL_StatusTypeDef g_sai_tx_result;
+
+static HAL_StatusTypeDef sai_transmit_dma_checked(void)
+{
+    g_sai_tx_result = HAL_SAI_Transmit_DMA(&hsai_BlockA1,
+                                            (uint8_t *)sai_dma_buf,
+                                            SAI_HALF_SAMPLES * 4U);
+    if (g_sai_tx_result != HAL_OK)
+        Error_Handler();
+    return g_sai_tx_result;
+}
+
 static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
 {
     /* Each DMA half: SAI_HALF_SAMPLES stereo pairs = SAI_HALF_SAMPLES*2 samples */
@@ -337,8 +358,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     remaining = (info->data_size > half_pcm_bytes * 2U)
               ? (info->data_size - half_pcm_bytes * 2U) : 0U;
 
-    if (HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)sai_dma_buf,
-                              SAI_HALF_SAMPLES * 4U) != HAL_OK)
+    if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
@@ -393,8 +413,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     if (!had_data)
         return UX_SUCCESS;
 
-    if (HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)sai_dma_buf,
-                              SAI_HALF_SAMPLES * 4U) != HAL_OK)
+    if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
 
     while (zeros < 2U)
@@ -877,7 +896,8 @@ VOID audio_playback_sai_files(FX_MEDIA *media)
             else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
             {
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
-                if (status != FX_SUCCESS) goto sai_done;
+                if (status != FX_SUCCESS)
+                	goto sai_done;
                 status = audio_stream_mp3_sai(&audio_file);
                 fx_file_close(&audio_file);
                 if (status != FX_SUCCESS && status != UX_SUCCESS) goto sai_done;
