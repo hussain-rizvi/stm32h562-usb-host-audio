@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "tad5112.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,6 +42,10 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+I2C_HandleTypeDef hi2c1;
+
+SAI_HandleTypeDef hsai_BlockA1;
+
 SD_HandleTypeDef hsd1;
 
 HCD_HandleTypeDef hhcd_USB_DRD_FS;
@@ -57,6 +61,8 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_USB_HCD_Init(void);
 static void MX_SDMMC1_SD_Init(void);
+static void MX_SAI1_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -101,8 +107,14 @@ int main(void)
   MX_ICACHE_Init();
   MX_USB_HCD_Init();
   MX_SDMMC1_SD_Init();
+  MX_SAI1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   /* SD_EN is asserted in MX_GPIO_Init (powers slot). No PA10 VBUS GPIO in current pinout. */
+#ifdef AUDIO_OUTPUT_SAI
+  extern void sai_dma_msp_setup(SAI_HandleTypeDef *hsai);
+  sai_dma_msp_setup(&hsai_BlockA1);
+#endif
   /* USER CODE END 2 */
 
   MX_ThreadX_Init();
@@ -139,20 +151,19 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_CSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
-  RCC_OscInitStruct.CSIState = RCC_CSI_ON;
-  RCC_OscInitStruct.CSICalibrationValue = RCC_CSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_CSI;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 125;
+  RCC_OscInitStruct.PLL.PLLN = 62;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1_VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1_VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1_VCORANGE_WIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 0;
+  RCC_OscInitStruct.PLL.PLLFRACN = 4096;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -195,6 +206,54 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x10C043E5;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief ICACHE Initialization Function
   * @param None
   * @retval None
@@ -223,6 +282,67 @@ static void MX_ICACHE_Init(void)
   /* USER CODE BEGIN ICACHE_Init 2 */
 
   /* USER CODE END ICACHE_Init 2 */
+
+}
+
+/**
+  * @brief SAI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SAI1_Init(void)
+{
+
+  /* USER CODE BEGIN SAI1_Init 0 */
+
+  /* USER CODE END SAI1_Init 0 */
+
+  /* USER CODE BEGIN SAI1_Init 1 */
+
+  /* USER CODE END SAI1_Init 1 */
+  hsai_BlockA1.Instance = SAI1_Block_A;
+  hsai_BlockA1.Init.AudioMode = SAI_MODEMASTER_TX;
+  hsai_BlockA1.Init.Synchro = SAI_ASYNCHRONOUS;
+  hsai_BlockA1.Init.OutputDrive = SAI_OUTPUTDRIVE_ENABLE;
+  hsai_BlockA1.Init.NoDivider = SAI_MASTERDIVIDER_ENABLE;
+  hsai_BlockA1.Init.FIFOThreshold = SAI_FIFOTHRESHOLD_1QF;
+  hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_48K;
+  hsai_BlockA1.Init.SynchroExt = SAI_SYNCEXT_DISABLE;
+  hsai_BlockA1.Init.MckOutput = SAI_MCK_OUTPUT_DISABLE;
+  hsai_BlockA1.Init.MonoStereoMode = SAI_STEREOMODE;
+  hsai_BlockA1.Init.CompandingMode = SAI_NOCOMPANDING;
+  hsai_BlockA1.Init.TriState = SAI_OUTPUT_NOTRELEASED;
+  if (HAL_SAI_InitProtocol(&hsai_BlockA1, SAI_I2S_STANDARD, SAI_PROTOCOL_DATASIZE_32BIT, 2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SAI1_Init 2 */
+  /* Switch SAI1 clock to PLL2P (135.2 MHz) for better sample-rate accuracy.
+     PLL2: CSI/1 × 169 / 5 = 135.2 MHz  (VCO = 676 MHz, VCIRANGE_2, WIDE)
+     48 kHz → MCKDIV=11 → 48011 Hz (+0.024%)
+     44.1 kHz → MCKDIV=12 → 44010 Hz (−0.204%)
+     CubeMX currently selects PLL1Q (250 MHz) giving +1.74% at 48 kHz. */
+  {
+    RCC_PeriphCLKInitTypeDef clk = {0};
+    clk.PeriphClockSelection      = RCC_PERIPHCLK_SAI1;
+    clk.PLL2.PLL2Source           = RCC_PLL2_SOURCE_CSI;
+    clk.PLL2.PLL2M                = 1;
+    clk.PLL2.PLL2N                = 169;
+    clk.PLL2.PLL2P                = 5;
+    clk.PLL2.PLL2Q                = 2;
+    clk.PLL2.PLL2R                = 2;
+    clk.PLL2.PLL2RGE              = RCC_PLL2_VCIRANGE_2;
+    clk.PLL2.PLL2VCOSEL           = RCC_PLL2_VCORANGE_WIDE;
+    clk.PLL2.PLL2FRACN            = 0;
+    clk.PLL2.PLL2ClockOut         = RCC_PLL2_DIVP;
+    clk.Sai1ClockSelection        = RCC_SAI1CLKSOURCE_PLL2P;
+    if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK)
+      Error_Handler();
+    /* Re-run HAL_SAI_Init (not MspInit) to recalculate MCKDIV for 135.2 MHz */
+    if (HAL_SAI_Init(&hsai_BlockA1) != HAL_OK)
+      Error_Handler();
+  }
+  /* USER CODE END SAI1_Init 2 */
 
 }
 
@@ -303,27 +423,28 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SD_EN_GPIO_Port, SD_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, MUTE_Pin|SD_EN_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin : SD_EN_Pin */
-  GPIO_InitStruct.Pin = SD_EN_Pin;
+  /*Configure GPIO pins : MUTE_Pin SD_EN_Pin */
+  GPIO_InitStruct.Pin = MUTE_Pin|SD_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SD_EN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SD_CD_Pin — interrupt on rising edge (card removed = pin goes HIGH) */
+  /*Configure GPIO pin : SD_CD_Pin */
   GPIO_InitStruct.Pin = SD_CD_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
-  HAL_NVIC_SetPriority(EXTI7_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(EXTI7_IRQn, 7, 0);
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */

@@ -55,6 +55,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern SAI_HandleTypeDef hsai_BlockA1;
 extern SD_HandleTypeDef hsd1;
 extern HCD_HandleTypeDef hhcd_USB_DRD_FS;
 extern TIM_HandleTypeDef htim2;
@@ -176,14 +177,6 @@ void TIM2_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles EXTI Line7 interrupt (SD card detect).
-  */
-void EXTI7_IRQHandler(void)
-{
-  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
-}
-
-/**
   * @brief This function handles USB FS global interrupt.
   */
 void USB_DRD_FS_IRQHandler(void)
@@ -211,6 +204,31 @@ void SDMMC1_IRQHandler(void)
   /* USER CODE END SDMMC1_IRQn 1 */
 }
 
-/* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles Serial Audio Interface 1 global interrupt.
+  */
+void SAI1_IRQHandler(void)
+{
+  /* USER CODE BEGIN SAI1_IRQn 0 */
 
+  /* USER CODE END SAI1_IRQn 0 */
+  HAL_SAI_IRQHandler(&hsai_BlockA1);
+  /* USER CODE BEGIN SAI1_IRQn 1 */
+
+  /* USER CODE END SAI1_IRQn 1 */
+}
+
+/* USER CODE BEGIN 1 */
+#ifdef AUDIO_OUTPUT_SAI
+extern DMA_HandleTypeDef hdma_sai1_a;
+void GPDMA1_Channel0_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_sai1_a);
+}
+#endif
+
+void EXTI7_IRQHandler(void)
+{
+    HAL_GPIO_EXTI_IRQHandler(SD_CD_Pin);
+}
 /* USER CODE END 1 */

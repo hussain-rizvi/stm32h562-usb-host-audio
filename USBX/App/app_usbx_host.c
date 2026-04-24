@@ -23,8 +23,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "main.h"
 #include "ux_host_audio.h"
 #include "app_filex.h"
+#include "tad5112.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -126,24 +128,31 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
 
   while (1)
   {
+    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
+    extern FX_MEDIA sdio_disk;
+
+#ifdef AUDIO_OUTPUT_SAI
+    /* SAI path: only wait for SD card, no USB speaker needed */
+    ULONG sd_flags;
+    extern I2C_HandleTypeDef hi2c1;
+    tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
+    tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+    /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
+    tad5112_init(&hi2c1);
+    audio_playback_sai_files(&sdio_disk);
+#else
+    /* USB path: wait for both USB speaker and SD card */
     ULONG actual_flags;
     ULONG sd_flags;
-    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
-
-    /* Wait for speaker — re-checked every iteration so re-plug works too. */
     tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
                        TX_AND, &actual_flags, TX_WAIT_FOREVER);
-
-    /* Wait for SD — re-checked every iteration so hot-insert after removal works. */
-    tx_event_flags_get(&sd_event_flags, 0x01UL,
-                       TX_AND, &sd_flags, TX_WAIT_FOREVER);
-
+    tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
     if (audio_speaker != UX_NULL)
     {
-      extern FX_MEDIA sdio_disk;
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
       audio_playback_wav_files(audio_speaker, &sdio_disk);
     }
+#endif
   }
   /* USER CODE END app_ux_host_thread_entry */
 }

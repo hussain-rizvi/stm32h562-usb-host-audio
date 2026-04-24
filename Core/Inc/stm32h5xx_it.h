@@ -55,6 +55,7 @@ void DebugMon_Handler(void);
 void TIM2_IRQHandler(void);
 void USB_DRD_FS_IRQHandler(void);
 void SDMMC1_IRQHandler(void);
+void SAI1_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */

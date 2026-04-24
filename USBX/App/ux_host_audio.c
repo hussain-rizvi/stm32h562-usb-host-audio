@@ -23,6 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "main.h"
 #include "tx_api.h"
 #include "fx_api.h"
 /* minimp3 inner decode loops (MDCT/QMF) must run fast regardless of project
@@ -163,6 +164,256 @@ static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
     tx_semaphore_put(&audio_xfer_semaphore);
 }
+
+/* ===================================================================
+ * SAI analogue output path  (32-bit I2S → TAD5112 CODEC)
+ * =================================================================== */
+#ifdef AUDIO_OUTPUT_SAI
+
+extern SAI_HandleTypeDef hsai_BlockA1;
+
+/* DMA ping-pong: two halves, each SAI_HALF_SAMPLES stereo 32-bit samples.
+   SAI is configured as SAI_PROTOCOL_DATASIZE_32BIT → BCLK/FSYNC = 64.
+   16-bit PCM from WAV/MP3 is left-shifted into the MSB of each 32-bit word
+   so the TAD5112 (32-bit mode) sees the correct amplitude.
+   Lower half = sai_dma_buf[0 .. SAI_HALF_SAMPLES*2-1]
+   Upper half = sai_dma_buf[SAI_HALF_SAMPLES*2 .. SAI_HALF_SAMPLES*4-1] */
+#define SAI_HALF_SAMPLES  1024U
+static int32_t sai_dma_buf[SAI_HALF_SAMPLES * 4U] __attribute__((aligned(32)));
+
+/* Temporary staging buffer: 16-bit PCM read from SD before 32-bit expansion */
+static int16_t s_sai_pcm16_tmp[SAI_HALF_SAMPLES * 2U];
+
+static TX_SEMAPHORE   sai_sem;
+static volatile UINT  sai_fill_upper;  /* 0 = lower half free, 1 = upper half free */
+
+void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
+{
+    (void)hsai;
+    sai_fill_upper = 0U;
+    tx_semaphore_put(&sai_sem);
+}
+
+void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
+{
+    (void)hsai;
+    sai_fill_upper = 1U;
+    tx_semaphore_put(&sai_sem);
+}
+
+static VOID sai_sem_flush(VOID)
+{
+    while (tx_semaphore_get(&sai_sem, TX_NO_WAIT) == TX_SUCCESS) {}
+}
+
+/* Reconfigure SAI MCLKDIV for the given sample rate (no PLL change).
+   Called between files; SAI must not be running (DMAStop before this). */
+static HAL_StatusTypeDef sai_reconfigure(ULONG sample_rate)
+{
+    uint32_t freq;
+    switch (sample_rate)
+    {
+        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  break;
+        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; break;
+        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; break;
+        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; break;
+        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; break;
+        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; break;
+        default:     freq = SAI_AUDIO_FREQUENCY_48K; break;
+    }
+    if (hsai_BlockA1.Init.AudioFrequency == freq)
+        return HAL_OK;
+    hsai_BlockA1.Init.AudioFrequency = freq;
+    return HAL_SAI_Init(&hsai_BlockA1);
+}
+
+/* Expand count 16-bit PCM samples into 32-bit MSB-aligned words.
+   Each int16_t is left-shifted by 16 so the TAD5112 DAC receives
+   the correct full-scale amplitude in 32-bit mode. */
+static void pcm16_to_pcm32(int32_t *dst, const int16_t *src, ULONG count)
+{
+    for (ULONG i = 0; i < count; i++)
+        dst[i] = (int32_t)src[i] << 16;
+}
+
+/* Fill one DMA half (half_cnt int32_t words) from the MP3 stream.
+   Decoded PCM (int16_t from minimp3) is expanded to int32_t in-place.
+   pcm_smp / pcm_off track the current decoded frame in SAMPLES (not bytes).
+   Zero-pads if EOF. Returns TX_TRUE if any real audio was written. */
+static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
+    ULONG *mp3_size, UINT *mp3_eof, int *pcm_smp, int *pcm_off,
+    UINT *sampling_set)
+{
+    mp3dec_frame_info_t info;
+    ULONG written = 0;   /* samples written to dst so far */
+
+    while (written < half_cnt)
+    {
+        if (*pcm_smp == 0)
+        {
+            if (!(*mp3_eof) && *mp3_size < 1440U)
+            {
+                ULONG to_read = MP3_READ_BUF_SIZE - *mp3_size;
+                ULONG nr = 0;
+                drain_read(file, s_mp3_read_buf + *mp3_size, to_read, &nr);
+                *mp3_size += nr;
+                if (nr < to_read) *mp3_eof = 1;
+            }
+            if (*mp3_size == 0) break;
+
+            int samples  = mp3dec_decode_frame(&s_mp3_decoder,
+                                               (const uint8_t *)s_mp3_read_buf,
+                                               (int)*mp3_size, s_mp3_pcm_buf, &info);
+            int consumed = info.frame_bytes;
+
+            if (samples <= 0)
+            {
+                if (*mp3_size == MP3_READ_BUF_SIZE)
+                {
+                    memmove(s_mp3_read_buf, s_mp3_read_buf + 1, *mp3_size - 1);
+                    (*mp3_size)--;
+                }
+                else { break; }
+                continue;
+            }
+
+            memmove(s_mp3_read_buf, s_mp3_read_buf + consumed, *mp3_size - (ULONG)consumed);
+            *mp3_size -= (ULONG)consumed;
+            *pcm_smp   = samples * info.channels;  /* total samples in frame */
+            *pcm_off   = 0;
+
+            if (!(*sampling_set))
+            {
+                (void)sai_reconfigure((ULONG)info.hz);
+                *sampling_set = 1;
+            }
+        }
+
+        ULONG to_copy = (ULONG)(*pcm_smp - *pcm_off);
+        if (to_copy > half_cnt - written)
+            to_copy = half_cnt - written;
+
+        /* Expand 16-bit minimp3 output → 32-bit MSB-aligned for TAD5112 */
+        pcm16_to_pcm32(dst + written, s_mp3_pcm_buf + *pcm_off, to_copy);
+
+        written  += to_copy;
+        *pcm_off += (int)to_copy;
+        if (*pcm_off >= *pcm_smp) *pcm_smp = 0;
+    }
+
+    if (written < half_cnt)
+        memset(dst + written, 0, (half_cnt - written) * sizeof(int32_t));
+
+    return (written > 0U) ? TX_TRUE : TX_FALSE;
+}
+
+static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
+{
+    /* Each DMA half: SAI_HALF_SAMPLES stereo pairs = SAI_HALF_SAMPLES*2 samples */
+    ULONG half_cnt      = SAI_HALF_SAMPLES * 2U;
+    ULONG half_pcm_bytes = half_cnt * sizeof(int16_t);  /* bytes of 16-bit PCM per half */
+    ULONG to_read, bytes_read, remaining;
+    UINT  zero_fills = 0U;
+    UINT  status     = UX_SUCCESS;
+
+    if (sai_reconfigure(info->sample_rate) != HAL_OK)
+        return UX_ERROR;
+
+    drain_reset();
+    sai_sem_flush();
+
+    /* Pre-fill lower half: read 16-bit PCM, expand to 32-bit in DMA buffer */
+    drain_read(file, (UCHAR *)s_sai_pcm16_tmp, half_pcm_bytes, &bytes_read);
+    if (bytes_read < half_pcm_bytes)
+        memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
+    pcm16_to_pcm32(sai_dma_buf, s_sai_pcm16_tmp, half_cnt);
+
+    /* Pre-fill upper half */
+    drain_read(file, (UCHAR *)s_sai_pcm16_tmp, half_pcm_bytes, &bytes_read);
+    if (bytes_read < half_pcm_bytes)
+        memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
+    pcm16_to_pcm32(sai_dma_buf + half_cnt, s_sai_pcm16_tmp, half_cnt);
+
+    remaining = (info->data_size > half_pcm_bytes * 2U)
+              ? (info->data_size - half_pcm_bytes * 2U) : 0U;
+
+    if (HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)sai_dma_buf,
+                              SAI_HALF_SAMPLES * 4U) != HAL_OK)
+        return UX_ERROR;
+
+    /* Refill one half per DMA callback; zero-fill after EOF then stop */
+    while (remaining > 0U || zero_fills < 2U)
+    {
+        if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
+        { status = UX_ERROR; break; }
+
+        int32_t *half = sai_fill_upper ? (sai_dma_buf + half_cnt) : sai_dma_buf;
+
+        if (remaining > 0U)
+        {
+            to_read = (remaining > half_pcm_bytes) ? half_pcm_bytes : remaining;
+            drain_read(file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
+            if (bytes_read < half_pcm_bytes)
+                memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
+            pcm16_to_pcm32(half, s_sai_pcm16_tmp, half_cnt);
+            remaining -= to_read;
+        }
+        else
+        {
+            memset(half, 0, half_cnt * sizeof(int32_t));
+            zero_fills++;
+        }
+    }
+
+    HAL_SAI_DMAStop(&hsai_BlockA1);
+    sai_sem_flush();
+    return status;
+}
+
+static UINT audio_stream_mp3_sai(FX_FILE *file)
+{
+    ULONG half_cnt     = SAI_HALF_SAMPLES * 2U;
+    UINT  status       = UX_SUCCESS;
+    UINT  sampling_set = 0U, mp3_eof = 0U;
+    ULONG mp3_size     = 0U;
+    int   pcm_smp      = 0,  pcm_off = 0;  /* in samples, not bytes */
+    UINT  zeros        = 0U;
+    UINT  had_data;
+
+    mp3dec_init(&s_mp3_decoder);
+    drain_reset();
+    sai_sem_flush();
+
+    /* Pre-fill lower half */
+    had_data  = sai_fill_half_mp3(sai_dma_buf, half_cnt, file,
+                                   &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
+    /* Pre-fill upper half */
+    had_data |= sai_fill_half_mp3(sai_dma_buf + half_cnt, half_cnt, file,
+                                   &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
+    if (!had_data)
+        return UX_SUCCESS;
+
+    if (HAL_SAI_Transmit_DMA(&hsai_BlockA1, (uint8_t *)sai_dma_buf,
+                              SAI_HALF_SAMPLES * 4U) != HAL_OK)
+        return UX_ERROR;
+
+    while (zeros < 2U)
+    {
+        if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
+        { status = UX_ERROR; break; }
+
+        int32_t *half = sai_fill_upper ? (sai_dma_buf + half_cnt) : sai_dma_buf;
+        had_data = sai_fill_half_mp3(half, half_cnt, file,
+                                      &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
+        if (!had_data) zeros++;
+    }
+
+    HAL_SAI_DMAStop(&hsai_BlockA1);
+    sai_sem_flush();
+    return status;
+}
+
+#endif /* AUDIO_OUTPUT_SAI */
 
 static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
 {
@@ -587,5 +838,60 @@ done:
     s_audio_playback_abort = TX_FALSE;
     tx_semaphore_delete(&audio_xfer_semaphore);
 }
+
+#ifdef AUDIO_OUTPUT_SAI
+VOID audio_playback_sai_files(FX_MEDIA *media)
+{
+    UINT  status;
+    CHAR  entry_name[FX_MAX_LONG_NAME_LEN];
+    UINT  file_attributes;
+    ULONG file_size;
+    FX_FILE audio_file;
+    WAV_INFO wav_info;
+
+    s_audio_playback_active = TX_TRUE;
+    tx_semaphore_create(&sai_sem, "sai_sem", 0);
+
+    while (1)
+    {
+        status = fx_directory_first_entry_find(media, entry_name);
+        if (status != FX_SUCCESS && status != FX_NO_MORE_ENTRIES)
+            goto sai_done;
+
+        while (status == FX_SUCCESS)
+        {
+            fx_directory_information_get(media, entry_name, &file_attributes,
+                                         &file_size, UX_NULL, UX_NULL,
+                                         UX_NULL, UX_NULL, UX_NULL, UX_NULL);
+
+            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
+            {
+                status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
+                if (status != FX_SUCCESS) goto sai_done;
+                status = wav_parse_header(&audio_file, &wav_info);
+                if (status == FX_SUCCESS)
+                    status = audio_stream_wav_sai(&audio_file, &wav_info);
+                fx_file_close(&audio_file);
+                if (status != FX_SUCCESS && status != UX_SUCCESS) goto sai_done;
+            }
+            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
+            {
+                status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
+                if (status != FX_SUCCESS) goto sai_done;
+                status = audio_stream_mp3_sai(&audio_file);
+                fx_file_close(&audio_file);
+                if (status != FX_SUCCESS && status != UX_SUCCESS) goto sai_done;
+            }
+
+            status = fx_directory_next_entry_find(media, entry_name);
+        }
+    }
+
+sai_done:
+    HAL_SAI_DMAStop(&hsai_BlockA1);
+    s_audio_playback_active = TX_FALSE;
+    tx_semaphore_delete(&sai_sem);
+}
+#endif /* AUDIO_OUTPUT_SAI */
 
 /* USER CODE END 1 */
