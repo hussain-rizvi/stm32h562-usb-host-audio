@@ -344,18 +344,19 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     drain_reset();
     sai_sem_flush();
 
-    /* Zero-fill the DMA buffer so the DAC output is silence (vol=0 from
-       init/mute) during startup.  tad5112_unmute() is called while zeros
-       are still being clocked, so the vol 0→201 transition happens at a
-       zero-crossing — no click.  The callback loop then fills audio from
-       the file beginning; no audio content is skipped. */
+    /* Zero-fill the DMA buffer and unmute immediately after DMA starts so
+       the vol 0→201 transition is guaranteed to occur while the buffer
+       contains only zeros — no audio content, no click.  The subsequent
+       sleep lets the DAC stabilise at vol=201 on silence before the
+       callback loop introduces real audio data. */
+    tad5112_mute();   /* explicit vol=0 in case previous track's mute was missed */
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
     remaining = info->data_size;
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
-    tx_thread_sleep(2);   /* let DAC stabilise on silence (~20 ms at 100 Hz) */
-    tad5112_unmute();     /* vol → 0 dB while zeros still clocking — no click */
+    tad5112_unmute();     /* vol → 0 dB immediately — buffer is provably all zeros */
+    tx_thread_sleep(2);   /* ~20 ms: DAC settles at vol=201 on silence */
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
     while (remaining > 0U || zero_fills < 2U)
@@ -401,12 +402,13 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     drain_reset();
     sai_sem_flush();
 
+    tad5112_mute();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
-    tx_thread_sleep(2);
     tad5112_unmute();
+    tx_thread_sleep(2);
 
     while (zeros < 2U)
     {
