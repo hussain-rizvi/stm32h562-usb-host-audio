@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "main.h"
+#include "tad5112.h"
 #include "tx_api.h"
 #include "fx_api.h"
 /* minimp3 inner decode loops (MDCT/QMF) must run fast regardless of project
@@ -343,23 +344,18 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     drain_reset();
     sai_sem_flush();
 
-    /* Pre-fill lower half: read 16-bit PCM, expand to 32-bit in DMA buffer */
-    drain_read(file, (UCHAR *)s_sai_pcm16_tmp, half_pcm_bytes, &bytes_read);
-    if (bytes_read < half_pcm_bytes)
-        memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
-    pcm16_to_pcm32(sai_dma_buf, s_sai_pcm16_tmp, half_cnt);
-
-    /* Pre-fill upper half */
-    drain_read(file, (UCHAR *)s_sai_pcm16_tmp, half_pcm_bytes, &bytes_read);
-    if (bytes_read < half_pcm_bytes)
-        memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
-    pcm16_to_pcm32(sai_dma_buf + half_cnt, s_sai_pcm16_tmp, half_cnt);
-
-    remaining = (info->data_size > half_pcm_bytes * 2U)
-              ? (info->data_size - half_pcm_bytes * 2U) : 0U;
+    /* Zero-fill the DMA buffer so the DAC output is silence (vol=0 from
+       init/mute) during startup.  tad5112_unmute() is called while zeros
+       are still being clocked, so the vol 0→201 transition happens at a
+       zero-crossing — no click.  The callback loop then fills audio from
+       the file beginning; no audio content is skipped. */
+    memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
+    remaining = info->data_size;
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
+    tx_thread_sleep(2);   /* let DAC stabilise on silence (~20 ms at 100 Hz) */
+    tad5112_unmute();     /* vol → 0 dB while zeros still clocking — no click */
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
     while (remaining > 0U || zero_fills < 2U)
@@ -385,6 +381,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         }
     }
 
+    tad5112_mute();
     HAL_SAI_DMAStop(&hsai_BlockA1);
     sai_sem_flush();
     return status;
@@ -398,23 +395,18 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     ULONG mp3_size     = 0U;
     int   pcm_smp      = 0,  pcm_off = 0;  /* in samples, not bytes */
     UINT  zeros        = 0U;
-    UINT  had_data;
+    UINT  had_data     = 0U;
 
     mp3dec_init(&s_mp3_decoder);
     drain_reset();
     sai_sem_flush();
 
-    /* Pre-fill lower half */
-    had_data  = sai_fill_half_mp3(sai_dma_buf, half_cnt, file,
-                                   &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
-    /* Pre-fill upper half */
-    had_data |= sai_fill_half_mp3(sai_dma_buf + half_cnt, half_cnt, file,
-                                   &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
-    if (!had_data)
-        return UX_SUCCESS;
+    memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
+    tx_thread_sleep(2);
+    tad5112_unmute();
 
     while (zeros < 2U)
     {
@@ -427,6 +419,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         if (!had_data) zeros++;
     }
 
+    tad5112_mute();
     HAL_SAI_DMAStop(&hsai_BlockA1);
     sai_sem_flush();
     return status;
