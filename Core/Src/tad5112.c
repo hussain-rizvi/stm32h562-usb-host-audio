@@ -61,3 +61,18 @@ HAL_StatusTypeDef tad5112_init(I2C_HandleTypeDef *hi2c)
 
 void tad5112_mute(void)   { vol_write(TAD5112_VOL_MUTE); }
 void tad5112_unmute(void) { vol_write(TAD5112_VOL_0DB);  }
+
+void tad5112_sleep(void)
+{
+    uint8_t val = 0x00U;
+    HAL_I2C_Mem_Write(s_hi2c, TAD5112_ADDR, TAD5112_R2,
+                      I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+}
+
+void tad5112_wake(void)
+{
+    uint8_t val = 0x01U;
+    HAL_I2C_Mem_Write(s_hi2c, TAD5112_ADDR, TAD5112_R2,
+                      I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    HAL_Delay(3);
+}

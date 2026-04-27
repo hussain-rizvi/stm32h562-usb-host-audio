@@ -318,28 +318,27 @@ static void MX_SAI1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SAI1_Init 2 */
-  /* Safety net: ensure SAI1 is on PLL2P (135.2 MHz) after CubeMX MspInit runs.
-     CubeMX must be set to SAI1→PLL2P with PLL2: HSE/2×169/5 (VCO=676 MHz).
-     If CubeMX correctly generates PLL2P in MspInit, this block is a no-op.
-     48 kHz → MCKDIV=11 → 48011 Hz (+0.024%)
-     44.1 kHz → MCKDIV=12 → 44010 Hz (−0.204%) */
+  /* PLL2: M=1 N=33 P=2 FRACN=6488 → PLL2P = 135,167,969 Hz  (48 kHz / 32 kHz default)
+     sai_reconfigure() switches FRACN to 7117 (135,475,097 Hz) for 44.1 kHz files.
+     48 kHz   → MCKDIV=11 → 47999.99 Hz (−0.000025%)
+     32 kHz   → NODIV MCKDIV=66 → 31999.99 Hz (−0.000025%)
+     44.1 kHz → MCKDIV=12 → 44099.97 Hz (−0.000075%, after per-file FRACN switch) */
   {
     RCC_PeriphCLKInitTypeDef clk = {0};
     clk.PeriphClockSelection      = RCC_PERIPHCLK_SAI1;
     clk.PLL2.PLL2Source           = RCC_PLL2_SOURCE_HSE;
-    clk.PLL2.PLL2M                = 2;
-    clk.PLL2.PLL2N                = 169;
-    clk.PLL2.PLL2P                = 5;
+    clk.PLL2.PLL2M                = 1;
+    clk.PLL2.PLL2N                = 33;
+    clk.PLL2.PLL2P                = 2;
     clk.PLL2.PLL2Q                = 2;
     clk.PLL2.PLL2R                = 2;
-    clk.PLL2.PLL2RGE              = RCC_PLL2_VCIRANGE_2;
+    clk.PLL2.PLL2RGE              = RCC_PLL2_VCIRANGE_3;
     clk.PLL2.PLL2VCOSEL           = RCC_PLL2_VCORANGE_WIDE;
-    clk.PLL2.PLL2FRACN            = 0;
+    clk.PLL2.PLL2FRACN            = 6488;
     clk.PLL2.PLL2ClockOut         = RCC_PLL2_DIVP;
     clk.Sai1ClockSelection        = RCC_SAI1CLKSOURCE_PLL2P;
     if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK)
       Error_Handler();
-    /* Recalculate MCKDIV for the actual 135.2 MHz clock */
     if (HAL_SAI_Init(&hsai_BlockA1) != HAL_OK)
       Error_Handler();
   }

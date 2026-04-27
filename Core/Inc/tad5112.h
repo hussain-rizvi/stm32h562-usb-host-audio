@@ -6,5 +6,7 @@
 HAL_StatusTypeDef tad5112_init(I2C_HandleTypeDef *hi2c);
 void tad5112_mute(void);
 void tad5112_unmute(void);
+void tad5112_sleep(void);
+void tad5112_wake(void);
 
 #endif /* TAD5112_H */

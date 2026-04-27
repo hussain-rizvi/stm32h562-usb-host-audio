@@ -208,25 +208,62 @@ static VOID sai_sem_flush(VOID)
     while (tx_semaphore_get(&sai_sem, TX_NO_WAIT) == TX_SUCCESS) {}
 }
 
-/* Reconfigure SAI MCLKDIV for the given sample rate (no PLL change).
+/* Two PLL2 FRACN values — M=1 N=33 P=2 VCIRANGE_3 (VCI=8 MHz, VCO≈270 MHz):
+   FRACN=7117 → PLL2P=135,475,097 Hz: 44100 → 44099.97 Hz (−0.000075%)
+   FRACN=6488 → PLL2P=135,167,969 Hz: 48000 → 47999.99 Hz (−0.000025%)
+                                        32000 → 31999.99 Hz (−0.000025%, NODIV) */
+#define PLL2_FRACN_44K  7117U
+#define PLL2_FRACN_48K  6488U
+
+static uint32_t s_pll2_fracn = PLL2_FRACN_48K;  /* matches startup init (48k default) */
+
+static HAL_StatusTypeDef pll2_set_fracn(uint32_t fracn)
+{
+    if (s_pll2_fracn == fracn)
+        return HAL_OK;
+    RCC_PeriphCLKInitTypeDef clk = {0};
+    clk.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
+    clk.PLL2.PLL2Source      = RCC_PLL2_SOURCE_HSE;
+    clk.PLL2.PLL2M           = 1;
+    clk.PLL2.PLL2N           = 33;
+    clk.PLL2.PLL2P           = 2;
+    clk.PLL2.PLL2Q           = 2;
+    clk.PLL2.PLL2R           = 2;
+    clk.PLL2.PLL2RGE         = RCC_PLL2_VCIRANGE_3;
+    clk.PLL2.PLL2VCOSEL      = RCC_PLL2_VCORANGE_WIDE;
+    clk.PLL2.PLL2FRACN       = fracn;
+    clk.PLL2.PLL2ClockOut    = RCC_PLL2_DIVP;
+    clk.Sai1ClockSelection   = RCC_SAI1CLKSOURCE_PLL2P;
+    HAL_StatusTypeDef st = HAL_RCCEx_PeriphCLKConfig(&clk);
+    if (st == HAL_OK)
+        s_pll2_fracn = fracn;
+    return st;
+}
+
+/* Reconfigure PLL2 FRACN and SAI MCLKDIV for the given sample rate.
    Called between files; SAI must not be running (DMAStop before this). */
 static HAL_StatusTypeDef sai_reconfigure(ULONG sample_rate)
 {
     uint32_t freq;
     uint32_t nodiv;
+    uint32_t fracn;
     switch (sample_rate)
     {
-        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
-        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
-        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
-        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
-        /* 32 kHz: NODIV=0 → HAL picks MCKDIV=16 → 33008 Hz (+3.15%, audible).
-           NODIV=1 uses direct BCLK divider (÷FRL=64): MCKDIV=66 → 32009 Hz (+0.027%). */
-        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; nodiv = SAI_MASTERDIVIDER_DISABLE; break;
-        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
-        default:     freq = SAI_AUDIO_FREQUENCY_48K; nodiv = SAI_MASTERDIVIDER_ENABLE;  break;
+        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
+        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
+        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
+        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
+        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; nodiv = SAI_MASTERDIVIDER_DISABLE; fracn = PLL2_FRACN_48K; break;
+        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
+        default:     freq = SAI_AUDIO_FREQUENCY_48K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
     }
-    if (hsai_BlockA1.Init.AudioFrequency == freq &&
+    UINT pll_changed = (s_pll2_fracn != fracn);
+    HAL_StatusTypeDef st = pll2_set_fracn(fracn);
+    if (st != HAL_OK)
+        return st;
+    /* Reinit SAI whenever PLL changed — MCKDIV must be recomputed against new PLL2P */
+    if (!pll_changed &&
+        hsai_BlockA1.Init.AudioFrequency == freq &&
         hsai_BlockA1.Init.NoDivider      == nodiv)
         return HAL_OK;
     hsai_BlockA1.Init.AudioFrequency = freq;
@@ -344,19 +381,21 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     drain_reset();
     sai_sem_flush();
 
-    /* Zero-fill the DMA buffer and unmute immediately after DMA starts so
-       the vol 0→201 transition is guaranteed to occur while the buffer
-       contains only zeros — no audio content, no click.  The subsequent
-       sleep lets the DAC stabilise at vol=201 on silence before the
-       callback loop introduces real audio data. */
-    tad5112_mute();   /* explicit vol=0 in case previous track's mute was missed */
+    /* Put TAD5112 to sleep so its analog output stage is powered down during
+       SAI startup.  This prevents the class-D modulator transient that occurs
+       when BCLK restarts from reaching the speaker, regardless of vol level.
+       After 20 ms the BCLK is stable; tad5112_wake() powers up the DAC to a
+       clean I2S signal (vol=0 → silence), then unmute starts audio. */
+    tad5112_mute();
+    tad5112_sleep();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
     remaining = info->data_size;
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
-    tad5112_unmute();     /* vol → 0 dB immediately — buffer is provably all zeros */
-    tx_thread_sleep(2);   /* ~20 ms: DAC settles at vol=201 on silence */
+    tx_thread_sleep(2);   /* 20 ms: BCLK stabilises while TAD5112 is asleep */
+    tad5112_wake();       /* powers up to stable BCLK, vol=0 → silent output */
+    tad5112_unmute();
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
     while (remaining > 0U || zero_fills < 2U)
@@ -383,6 +422,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     }
 
     tad5112_mute();
+    tad5112_sleep();
     HAL_SAI_DMAStop(&hsai_BlockA1);
     sai_sem_flush();
     return status;
@@ -403,12 +443,14 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     sai_sem_flush();
 
     tad5112_mute();
+    tad5112_sleep();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
     if (sai_transmit_dma_checked() != HAL_OK)
         return UX_ERROR;
+    tx_thread_sleep(2);   /* 20 ms: BCLK stabilises while TAD5112 is asleep */
+    tad5112_wake();       /* powers up to stable BCLK, vol=0 → silent output */
     tad5112_unmute();
-    tx_thread_sleep(2);
 
     while (zeros < 2U)
     {
@@ -422,6 +464,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     }
 
     tad5112_mute();
+    tad5112_sleep();
     HAL_SAI_DMAStop(&hsai_BlockA1);
     sai_sem_flush();
     return status;
