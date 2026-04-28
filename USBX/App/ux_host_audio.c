@@ -453,6 +453,46 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     drain_reset();
     sai_sem_flush();
 
+    /* Pre-probe the MP3 sample rate so sai_reconfigure() runs BEFORE DMA starts.
+     * Calling it inside sai_fill_half_mp3 on the first DMA callback (while DMA
+     * is already running) re-inits the SAI mid-transfer, stops callbacks, and
+     * causes the 2-second semaphore wait to time out on every WAV<->MP3 switch. */
+    {
+        ULONG nr = 0;
+        drain_read(file, s_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
+        ULONG probe_size = nr;
+
+        while (probe_size > 0)
+        {
+            mp3dec_frame_info_t probe_info;
+            int s = mp3dec_decode_frame(&s_mp3_decoder,
+                        (const uint8_t *)s_mp3_read_buf, (int)probe_size,
+                        s_mp3_pcm_buf, &probe_info);
+            if (s > 0)
+            {
+                (void)sai_reconfigure((ULONG)probe_info.hz);
+                sampling_set = 1;
+                break;
+            }
+            if (probe_size == (ULONG)MP3_READ_BUF_SIZE)
+            {
+                memmove(s_mp3_read_buf, s_mp3_read_buf + 1, probe_size - 1);
+                probe_size--;
+            }
+            else
+                break;
+        }
+
+        /* Reset file and decoder so the streaming pass starts from the beginning. */
+        fx_file_seek(file, 0);
+        mp3dec_init(&s_mp3_decoder);
+        drain_reset();
+        mp3_size = 0;
+        mp3_eof  = 0;
+        pcm_smp  = 0;
+        pcm_off  = 0;
+    }
+
     tad5112_mute();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
