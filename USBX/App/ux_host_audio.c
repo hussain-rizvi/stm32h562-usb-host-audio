@@ -403,6 +403,11 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     tx_thread_sleep(50);   /* 500 ms: BCLK stable, TAD5112 synced, vol=0 → 0 V out */
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
+    /* Flush semaphore counts that piled up during the 500 ms sleep.  DMA ran
+       ~10 half/full callbacks while we slept; consuming stale counts would make
+       the loop write the same DMA half repeatedly without waiting, overlapping
+       a write with an active DMA read and producing noise at song start. */
+    sai_sem_flush();
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
     while (remaining > 0U || zero_fills < 2U)
@@ -505,6 +510,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     tx_thread_sleep(50);   /* 500 ms: BCLK stable, TAD5112 synced, vol=0 → 0 V out */
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
+    sai_sem_flush();  /* discard stale counts from DMA callbacks during sleep */
 
     while (zeros < 2U)
     {
@@ -767,14 +773,15 @@ static UINT str_ends_with_mp3(CHAR *name)
 static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 {
     mp3dec_frame_info_t info;
-    ULONG mp3_size   = 0;
+    ULONG mp3_size    = 0;
     UINT  sampling_set = 0;
     UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
     ULONG packet_size = AUDIO_MAX_PACKET_SIZE;
     UINT  wr          = 0;
     UINT  inflight    = 0;
     UINT  status      = UX_SUCCESS;
-    int   consumed, samples, pcm_bytes, pcm_offset, to_copy;
+    int   consumed, samples, pcm_bytes;
+    ULONG slot_fill   = 0;  /* bytes filled in audio_ring_buf[wr] so far */
 
     mp3dec_init(&s_mp3_decoder);
     drain_reset();
@@ -838,34 +845,54 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
             sampling_set = 1;
         }
 
-        /* Parcel PCM frame into USB packets using the ring buffer. */
-        pcm_offset = 0;
+        /* Pack PCM into ring slots without breaking at frame boundaries.
+         * slot_fill persists across frames: the tail bytes of one frame
+         * fill the start of the next slot instead of being zero-padded.
+         * Zero-padding only happens once, on the very last partial slot at EOF.
+         * Without this, 44.1 kHz MP3 (4608 PCM bytes, 176-byte packets) inserts
+         * 144 silence bytes every 26 ms (~38 Hz buzz). */
+        int pcm_offset = 0;
         while (pcm_offset < pcm_bytes)
         {
-            to_copy = pcm_bytes - pcm_offset;
-            if (to_copy > (int)packet_size) to_copy = (int)packet_size;
+            int space = (int)packet_size - (int)slot_fill;
+            int take  = pcm_bytes - pcm_offset;
+            if (take > space) take = space;
 
-            memcpy(audio_ring_buf[wr], (UCHAR *)s_mp3_pcm_buf + pcm_offset, to_copy);
-            if (to_copy < (int)packet_size)
-                memset(audio_ring_buf[wr] + to_copy, 0, packet_size - (ULONG)to_copy);
+            memcpy(audio_ring_buf[wr] + slot_fill,
+                   (UCHAR *)s_mp3_pcm_buf + pcm_offset, (ULONG)take);
+            slot_fill  += (ULONG)take;
+            pcm_offset += take;
 
-            /* Once ring is saturated, wait for one completion before submitting. */
-            if (inflight == AUDIO_INFLIGHT)
+            if (slot_fill == packet_size)
             {
-                status = audio_wait_xfer_done();
+                if (inflight == AUDIO_INFLIGHT)
+                {
+                    status = audio_wait_xfer_done();
+                    if (status != UX_SUCCESS)
+                        goto mp3_done;
+                    inflight--;
+                }
+                status = ring_submit(audio, wr, packet_size);
                 if (status != UX_SUCCESS)
                     goto mp3_done;
-                inflight--;
+                wr = (wr + 1U) % AUDIO_RING_SLOTS;
+                inflight++;
+                slot_fill = 0;
             }
-
-            status = ring_submit(audio, wr, packet_size);
-            if (status != UX_SUCCESS)
-                goto mp3_done;
-
-            wr = (wr + 1U) % AUDIO_RING_SLOTS;
-            inflight++;
-            pcm_offset += to_copy;
         }
+    }
+
+    /* Flush partial last slot at EOF */
+    if (slot_fill > 0 && packet_size > 0)
+    {
+        memset(audio_ring_buf[wr] + slot_fill, 0, packet_size - slot_fill);
+        if (inflight == AUDIO_INFLIGHT)
+        {
+            (void)audio_wait_xfer_done();
+            inflight--;
+        }
+        (void)ring_submit(audio, wr, packet_size);
+        inflight++;
     }
 
 mp3_done:
