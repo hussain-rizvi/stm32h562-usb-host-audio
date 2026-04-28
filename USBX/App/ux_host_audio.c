@@ -381,20 +381,27 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     drain_reset();
     sai_sem_flush();
 
-    /* Put TAD5112 to sleep so its analog output stage is powered down during
-       SAI startup.  This prevents the class-D modulator transient that occurs
-       when BCLK restarts from reaching the speaker, regardless of vol level.
-       After 20 ms the BCLK is stable; tad5112_wake() powers up the DAC to a
-       clean I2S signal (vol=0 → silence), then unmute starts audio. */
+    /* Mute the amp for exactly 5 ms around SAI start.  The amp is kept powered
+       between songs (MUTE_Pin stays HIGH) so its internal bias caps remain fully
+       charged; 5 ms of muting means minimal cap discharge and a near-silent
+       re-enable.  After the amp is back on, 20 ms of vol=0 silence lets the
+       TAD5112 fully settle on the stable BCLK before unmute. */
     tad5112_mute();
-    tad5112_sleep();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
     remaining = info->data_size;
 
+    /* MUTE_Pin LOW before BCLK starts: blocks the TAD5112 analog output-stage
+       settling transient while the SAI clock restarts.  After 500 ms the DAC
+       output is stable at 0 V (vol=0, zeros playing) so re-enabling the amp
+       is silent. */
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     if (sai_transmit_dma_checked() != HAL_OK)
+    {
+        HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
         return UX_ERROR;
-    tx_thread_sleep(2);   /* 20 ms: BCLK stabilises while TAD5112 is asleep */
-    tad5112_wake();       /* powers up to stable BCLK, vol=0 → silent output */
+    }
+    tx_thread_sleep(50);   /* 500 ms: BCLK stable, TAD5112 synced, vol=0 → 0 V out */
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
@@ -422,8 +429,12 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     }
 
     tad5112_mute();
-    tad5112_sleep();
+    /* Brief MUTE_Pin LOW only around DMAStop: blocks the BCLK-stop glitch from
+       the TAD5112 output stage, but the amp is off for < 1 ms so its charge-pump
+       caps stay charged and re-enable is silent. */
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     HAL_SAI_DMAStop(&hsai_BlockA1);
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     sai_sem_flush();
     return status;
 }
@@ -443,13 +454,16 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     sai_sem_flush();
 
     tad5112_mute();
-    tad5112_sleep();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     if (sai_transmit_dma_checked() != HAL_OK)
+    {
+        HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
         return UX_ERROR;
-    tx_thread_sleep(2);   /* 20 ms: BCLK stabilises while TAD5112 is asleep */
-    tad5112_wake();       /* powers up to stable BCLK, vol=0 → silent output */
+    }
+    tx_thread_sleep(50);   /* 500 ms: BCLK stable, TAD5112 synced, vol=0 → 0 V out */
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
 
     while (zeros < 2U)
@@ -464,8 +478,9 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     }
 
     tad5112_mute();
-    tad5112_sleep();
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     HAL_SAI_DMAStop(&hsai_BlockA1);
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     sai_sem_flush();
     return status;
 }
