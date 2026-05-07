@@ -79,8 +79,10 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 /* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
 static volatile UINT s_audio_playback_abort;
 
-/* Set for whole audio_playback_wav_files() so FileX can defer fx_media_close until playback is idle. */
-static volatile UINT s_audio_playback_active;
+/* Separate active flags so SAI and USB threads can run concurrently without
+   one clearing the other's flag and allowing FileX to close the media early. */
+static volatile UINT s_audio_playback_active;      /* SAI path */
+static volatile UINT s_audio_playback_active_usb;  /* USB path */
 
 /*
  * Block until ISO transfer completes or disconnect/timeout.
@@ -152,7 +154,7 @@ VOID audio_playback_usb_disconnect_notify(VOID)
 
 UINT audio_playback_is_active(VOID)
 {
-    return s_audio_playback_active;
+    return s_audio_playback_active || s_audio_playback_active_usb;
 }
 
 /* MP3 decode uses large stack inside minimp3 (~15 KB). Keep I/O buffers & decoder out of thread stack. */
@@ -185,9 +187,54 @@ static int32_t sai_dma_buf[SAI_HALF_SAMPLES * 4U] __attribute__((aligned(32)));
 
 /* Temporary staging buffer: 16-bit PCM read from SD before 32-bit expansion */
 static int16_t s_sai_pcm16_tmp[SAI_HALF_SAMPLES * 2U];
+/* Staging buffer for MP3→USB 32→16-bit conversion in dual-output mode */
+static int16_t s_usb_dual_pcm16[SAI_HALF_SAMPLES * 2U];
 
 static TX_SEMAPHORE   sai_sem;
 static volatile UINT  sai_fill_upper;  /* 0 = lower half free, 1 = upper half free */
+
+/* SAI-specific SD drain buffer — completely separate from the USB drain buffer
+   so both threads can stream SD concurrently without corrupting each other. */
+static UCHAR s_sai_sd_chunk_buf[AUDIO_SD_CHUNK_SIZE] __attribute__((aligned(4)));
+static ULONG s_sai_sd_chunk_pos;
+static ULONG s_sai_sd_chunk_avail;
+
+static VOID sai_drain_reset(VOID)
+{
+    s_sai_sd_chunk_pos   = 0;
+    s_sai_sd_chunk_avail = 0;
+}
+
+static UINT sai_drain_read(FX_FILE *f, UCHAR *dst, ULONG want, ULONG *got_out)
+{
+    ULONG got = 0;
+    while (got < want)
+    {
+        if (s_sai_sd_chunk_avail == 0)
+        {
+            ULONG nr;
+            UINT st = fx_file_read(f, s_sai_sd_chunk_buf, AUDIO_SD_CHUNK_SIZE, &nr);
+            if (st != FX_SUCCESS || nr == 0)
+                break;
+            s_sai_sd_chunk_pos   = 0;
+            s_sai_sd_chunk_avail = nr;
+        }
+        ULONG take = want - got;
+        if (take > s_sai_sd_chunk_avail)
+            take = s_sai_sd_chunk_avail;
+        memcpy(dst + got, s_sai_sd_chunk_buf + s_sai_sd_chunk_pos, take);
+        s_sai_sd_chunk_pos   += take;
+        s_sai_sd_chunk_avail -= take;
+        got                  += take;
+    }
+    *got_out = got;
+    return (got > 0) ? FX_SUCCESS : FX_IO_ERROR;
+}
+
+/* SAI-specific MP3 state — separate from USB path so both can decode independently */
+static mp3dec_t      s_sai_mp3_decoder;
+static UCHAR         s_sai_mp3_read_buf[MP3_READ_BUF_SIZE];
+static mp3d_sample_t s_sai_mp3_pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
 void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 {
@@ -207,6 +254,67 @@ static VOID sai_sem_flush(VOID)
 {
     while (tx_semaphore_get(&sai_sem, TX_NO_WAIT) == TX_SUCCESS) {}
 }
+
+/* Dual-output state — when s_usb_audio != NULL, PCM16 is also sent to USB speaker */
+static UX_HOST_CLASS_AUDIO *s_usb_audio          = UX_NULL;
+static ULONG                s_usb_pkt_size       = 0;
+static ULONG                s_usb_sample_rate    = 0;
+static UINT                 s_usb_channels_num   = 0;
+static ULONG                s_usb_frac_acc       = 0;
+static volatile UINT        s_usb_running        = 0;
+static UINT                 s_usb_thread_active  = 0;
+
+/* PCM FIFO — SAI thread writes, USB feeder thread reads.
+   Single-producer / single-consumer lock-free ring.  Power-of-2 for mask wrapping. */
+#define USB_PCM_FIFO_SIZE  16384U
+static UCHAR          s_usb_fifo[USB_PCM_FIFO_SIZE];
+static volatile ULONG s_usb_fifo_wr = 0;
+static volatile ULONG s_usb_fifo_rd = 0;
+
+/* USB feeder thread — dedicated thread that submits USB packets independently of SAI */
+#define USB_FEEDER_STACK_SIZE  4096U
+static UCHAR        s_usb_stack[USB_FEEDER_STACK_SIZE];
+static TX_THREAD    s_usb_thread;
+static TX_SEMAPHORE s_usb_xfer_sem;  /* signalled by USB completion callback */
+static TX_SEMAPHORE s_usb_done_sem;  /* signalled by feeder thread on exit */
+
+static VOID usb_fifo_reset(VOID)
+{
+    s_usb_fifo_wr = 0;
+    s_usb_fifo_rd = 0;
+}
+
+/* SAI thread writes PCM here — non-blocking, drops if full */
+static ULONG usb_fifo_write(const UCHAR *src, ULONG n)
+{
+    ULONG free = USB_PCM_FIFO_SIZE - 1U -
+                 ((s_usb_fifo_wr - s_usb_fifo_rd) & (USB_PCM_FIFO_SIZE - 1U));
+    if (n > free) n = free;
+    for (ULONG i = 0; i < n; i++)
+        s_usb_fifo[(s_usb_fifo_wr + i) & (USB_PCM_FIFO_SIZE - 1U)] = src[i];
+    __DMB();
+    s_usb_fifo_wr += n;
+    return n;
+}
+
+/* USB feeder thread reads PCM here — zero-pads if FIFO runs low */
+static VOID usb_fifo_read_padded(UCHAR *dst, ULONG n)
+{
+    ULONG avail = (s_usb_fifo_wr - s_usb_fifo_rd) & (USB_PCM_FIFO_SIZE - 1U);
+    ULONG take  = (avail < n) ? avail : n;
+    for (ULONG i = 0; i < take; i++)
+        dst[i] = s_usb_fifo[(s_usb_fifo_rd + i) & (USB_PCM_FIFO_SIZE - 1U)];
+    if (take < n)
+        memset(dst + take, 0, n - take);
+    __DMB();
+    s_usb_fifo_rd += take;
+}
+
+/* Forward declarations — bodies are after the ring buffer arrays */
+static VOID sai_submit_pcm16_to_usb(const int16_t *pcm16, ULONG n_bytes);
+static VOID sai_usb_prefill(VOID);
+static VOID sai_usb_drain(VOID);
+static VOID sai_usb_configure(ULONG sample_rate, UINT channels);
 
 /* Two PLL2 FRACN values — M=1 N=33 P=2 VCIRANGE_3 (VCI=8 MHz, VCO≈270 MHz):
    FRACN=7117 → PLL2P=135,475,097 Hz: 44100 → 44099.97 Hz (−0.000075%)
@@ -262,13 +370,17 @@ static HAL_StatusTypeDef sai_reconfigure(ULONG sample_rate)
     if (st != HAL_OK)
         return st;
     /* Reinit SAI whenever PLL changed — MCKDIV must be recomputed against new PLL2P */
-    if (!pll_changed &&
-        hsai_BlockA1.Init.AudioFrequency == freq &&
-        hsai_BlockA1.Init.NoDivider      == nodiv)
-        return HAL_OK;
-    hsai_BlockA1.Init.AudioFrequency = freq;
-    hsai_BlockA1.Init.NoDivider      = nodiv;
-    return HAL_SAI_Init(&hsai_BlockA1);
+    if (pll_changed ||
+        hsai_BlockA1.Init.AudioFrequency != freq ||
+        hsai_BlockA1.Init.NoDivider      != nodiv)
+    {
+        hsai_BlockA1.Init.AudioFrequency = freq;
+        hsai_BlockA1.Init.NoDivider      = nodiv;
+        st = HAL_SAI_Init(&hsai_BlockA1);
+        if (st != HAL_OK)
+            return st;
+    }
+    return HAL_OK;
 }
 
 /* Expand count 16-bit PCM samples into 32-bit MSB-aligned words.
@@ -299,29 +411,29 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
             {
                 ULONG to_read = MP3_READ_BUF_SIZE - *mp3_size;
                 ULONG nr = 0;
-                drain_read(file, s_mp3_read_buf + *mp3_size, to_read, &nr);
+                sai_drain_read(file, s_sai_mp3_read_buf + *mp3_size, to_read, &nr);
                 *mp3_size += nr;
                 if (nr < to_read) *mp3_eof = 1;
             }
             if (*mp3_size == 0) break;
 
-            int samples  = mp3dec_decode_frame(&s_mp3_decoder,
-                                               (const uint8_t *)s_mp3_read_buf,
-                                               (int)*mp3_size, s_mp3_pcm_buf, &info);
+            int samples  = mp3dec_decode_frame(&s_sai_mp3_decoder,
+                                               (const uint8_t *)s_sai_mp3_read_buf,
+                                               (int)*mp3_size, s_sai_mp3_pcm_buf, &info);
             int consumed = info.frame_bytes;
 
             if (samples <= 0)
             {
                 if (*mp3_size == MP3_READ_BUF_SIZE)
                 {
-                    memmove(s_mp3_read_buf, s_mp3_read_buf + 1, *mp3_size - 1);
+                    memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + 1, *mp3_size - 1);
                     (*mp3_size)--;
                 }
                 else { break; }
                 continue;
             }
 
-            memmove(s_mp3_read_buf, s_mp3_read_buf + consumed, *mp3_size - (ULONG)consumed);
+            memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + consumed, *mp3_size - (ULONG)consumed);
             *mp3_size -= (ULONG)consumed;
             *pcm_smp   = samples * info.channels;  /* total samples in frame */
             *pcm_off   = 0;
@@ -338,7 +450,7 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
             to_copy = half_cnt - written;
 
         /* Expand 16-bit minimp3 output → 32-bit MSB-aligned for TAD5112 */
-        pcm16_to_pcm32(dst + written, s_mp3_pcm_buf + *pcm_off, to_copy);
+        pcm16_to_pcm32(dst + written, s_sai_mp3_pcm_buf + *pcm_off, to_copy);
 
         written  += to_copy;
         *pcm_off += (int)to_copy;
@@ -378,7 +490,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     if (sai_reconfigure(info->sample_rate) != HAL_OK)
         return UX_ERROR;
 
-    drain_reset();
+    sai_drain_reset();
     sai_sem_flush();
 
     /* Mute the amp for exactly 5 ms around SAI start.  The amp is kept powered
@@ -408,6 +520,11 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
        the loop write the same DMA half repeatedly without waiting, overlapping
        a write with an active DMA read and producing noise at song start. */
     sai_sem_flush();
+    /* Configure USB alt-interface immediately before the first packet is sent,
+       then pre-fill the ring with silence so the pipeline is never empty while
+       the thread reads SD between SAI half-callbacks. */
+    sai_usb_configure(info->sample_rate, info->channels);
+    sai_usb_prefill();
 
     /* Refill one half per DMA callback; zero-fill after EOF then stop */
     while (remaining > 0U || zero_fills < 2U)
@@ -420,10 +537,11 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         if (remaining > 0U)
         {
             to_read = (remaining > half_pcm_bytes) ? half_pcm_bytes : remaining;
-            drain_read(file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
+            sai_drain_read(file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
             if (bytes_read < half_pcm_bytes)
                 memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
             pcm16_to_pcm32(half, s_sai_pcm16_tmp, half_cnt);
+            sai_submit_pcm16_to_usb(s_sai_pcm16_tmp, to_read);
             remaining -= to_read;
         }
         else
@@ -440,6 +558,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     HAL_SAI_DMAStop(&hsai_BlockA1);
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
+    sai_usb_drain();
     sai_sem_flush();
     return status;
 }
@@ -453,9 +572,11 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     int   pcm_smp      = 0,  pcm_off = 0;  /* in samples, not bytes */
     UINT  zeros        = 0U;
     UINT  had_data     = 0U;
+    ULONG probe_hz     = 48000U;
+    UINT  probe_ch     = 2U;
 
-    mp3dec_init(&s_mp3_decoder);
-    drain_reset();
+    mp3dec_init(&s_sai_mp3_decoder);
+    sai_drain_reset();
     sai_sem_flush();
 
     /* Pre-probe the MP3 sample rate so sai_reconfigure() runs BEFORE DMA starts.
@@ -464,24 +585,26 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
      * causes the 2-second semaphore wait to time out on every WAV<->MP3 switch. */
     {
         ULONG nr = 0;
-        drain_read(file, s_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
+        sai_drain_read(file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
         ULONG probe_size = nr;
 
         while (probe_size > 0)
         {
             mp3dec_frame_info_t probe_info;
-            int s = mp3dec_decode_frame(&s_mp3_decoder,
-                        (const uint8_t *)s_mp3_read_buf, (int)probe_size,
-                        s_mp3_pcm_buf, &probe_info);
+            int s = mp3dec_decode_frame(&s_sai_mp3_decoder,
+                        (const uint8_t *)s_sai_mp3_read_buf, (int)probe_size,
+                        s_sai_mp3_pcm_buf, &probe_info);
             if (s > 0)
             {
                 (void)sai_reconfigure((ULONG)probe_info.hz);
+                probe_hz     = (ULONG)probe_info.hz;
+                probe_ch     = (UINT)probe_info.channels;
                 sampling_set = 1;
                 break;
             }
             if (probe_size == (ULONG)MP3_READ_BUF_SIZE)
             {
-                memmove(s_mp3_read_buf, s_mp3_read_buf + 1, probe_size - 1);
+                memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + 1, probe_size - 1);
                 probe_size--;
             }
             else
@@ -490,8 +613,8 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
 
         /* Reset file and decoder so the streaming pass starts from the beginning. */
         fx_file_seek(file, 0);
-        mp3dec_init(&s_mp3_decoder);
-        drain_reset();
+        mp3dec_init(&s_sai_mp3_decoder);
+        sai_drain_reset();
         mp3_size = 0;
         mp3_eof  = 0;
         pcm_smp  = 0;
@@ -511,6 +634,8 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
     sai_sem_flush();  /* discard stale counts from DMA callbacks during sleep */
+    sai_usb_configure(probe_hz, probe_ch);
+    sai_usb_prefill();
 
     while (zeros < 2U)
     {
@@ -520,6 +645,12 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         int32_t *half = sai_fill_upper ? (sai_dma_buf + half_cnt) : sai_dma_buf;
         had_data = sai_fill_half_mp3(half, half_cnt, file,
                                       &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
+        if (s_usb_audio != UX_NULL && s_usb_pkt_size > 0)
+        {
+            for (ULONG i = 0; i < half_cnt; i++)
+                s_usb_dual_pcm16[i] = (int16_t)(half[i] >> 16);
+            sai_submit_pcm16_to_usb(s_usb_dual_pcm16, half_cnt * sizeof(int16_t));
+        }
         if (!had_data) zeros++;
     }
 
@@ -527,6 +658,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     HAL_SAI_DMAStop(&hsai_BlockA1);
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
+    sai_usb_drain();
     sai_sem_flush();
     return status;
 }
@@ -631,15 +763,156 @@ static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
  *   minimp3 no-SIMD on Cortex-M33 takes ~15-20 ms to decode one 26 ms frame.
  *   AUDIO_INFLIGHT must exceed that worst-case decode gap so the USB pipeline
  *   never runs dry between frames.  At 44.1 kHz stereo 16-bit the packet size
- *   is ~176 bytes (= 1 ms of audio), so AUDIO_INFLIGHT=24 gives ~24 ms headroom.
+ *   is ~176 bytes (= 1 ms of audio), so AUDIO_INFLIGHT=48 gives ~48 ms headroom.
+ *   In dual SAI+USB mode the SAI half fires every ~21 ms; SD reads and ThreadX
+ *   scheduling can delay the thread by up to 10 ms, so the pre-filled lead must
+ *   exceed (half_period + max_delay) = ~32 ms — AUDIO_INFLIGHT=48 gives 16 ms margin.
  *   AUDIO_RING_SLOTS must be > AUDIO_INFLIGHT to avoid wrap-around overlap.
- *   RAM cost: 32 × 256 = 8 KB.
+ *   RAM cost: 64 × 256 = 16 KB.
  */
-#define AUDIO_RING_SLOTS  32
-#define AUDIO_INFLIGHT    24
+#define AUDIO_RING_SLOTS  64
+#define AUDIO_INFLIGHT    48
 
 static UCHAR audio_ring_buf[AUDIO_RING_SLOTS][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
 static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_ring_xfer[AUDIO_RING_SLOTS];
+
+#ifdef AUDIO_OUTPUT_SAI
+/* USB completion callback — signals the feeder thread; never blocks. */
+static VOID usb_feeder_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
+{
+    (void)xfer;
+    tx_semaphore_put(&s_usb_xfer_sem);
+}
+
+/* Submit ring slot idx with pkt_bytes bytes to the USB speaker. */
+static VOID ring_submit_usb(UINT idx, ULONG pkt_bytes)
+{
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_data_pointer        = audio_ring_buf[idx];
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_requested_length    = pkt_bytes;
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_packet_size         = s_usb_pkt_size;
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_completion_function = usb_feeder_complete;
+    ux_host_class_audio_write(s_usb_audio, &audio_ring_xfer[idx]);
+}
+
+/* Dedicated USB feeder thread — runs completely independent of the SAI thread.
+   Drains the PCM FIFO and submits USB packets exactly like the USB-only path:
+   block on completion → fill next slot from FIFO → submit.
+   The fractional accumulator sends the right number of bytes per ms so the
+   long-run average equals the SAI sample rate (e.g. 44100 Hz → 9×176 + 1×180
+   bytes per 10 ms), preventing FIFO drift that causes cracking. */
+static VOID usb_feeder_thread_entry(ULONG arg)
+{
+    (void)arg;
+    UINT  wr       = 0;
+    UINT  inflight = 0;
+
+    if (s_usb_pkt_size == 0)
+        goto feeder_exit;
+
+    /* Pre-fill AUDIO_INFLIGHT silent packets to prime the pipeline */
+    for (UINT i = 0; i < AUDIO_INFLIGHT; i++)
+    {
+        memset(audio_ring_buf[wr], 0, s_usb_pkt_size);
+        ring_submit_usb(wr, s_usb_pkt_size);
+        wr = (wr + 1U) % AUDIO_RING_SLOTS;
+        inflight++;
+    }
+
+    while (1)
+    {
+        /* Block until one transfer completes (instant wake from callback) */
+        if (tx_semaphore_get(&s_usb_xfer_sem, TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS)
+            break;
+        inflight--;
+
+        /* Exit when stream stopped and FIFO is drained */
+        ULONG avail = (s_usb_fifo_wr - s_usb_fifo_rd) & (USB_PCM_FIFO_SIZE - 1U);
+        if (!s_usb_running && avail == 0)
+            break;
+
+        /* Fractional accumulator: match exact sample rate so FIFO neither
+           overflows nor starves (44100 Hz → alternates 176 / 180 bytes) */
+        s_usb_frac_acc    += s_usb_sample_rate;
+        ULONG samples      = s_usb_frac_acc / 1000U;
+        s_usb_frac_acc    %= 1000U;
+        ULONG pkt_bytes    = samples * s_usb_channels_num * sizeof(int16_t);
+        if (pkt_bytes == 0 || pkt_bytes > s_usb_pkt_size)
+            pkt_bytes = s_usb_pkt_size;
+
+        usb_fifo_read_padded(audio_ring_buf[wr], pkt_bytes);
+        ring_submit_usb(wr, pkt_bytes);
+        wr = (wr + 1U) % AUDIO_RING_SLOTS;
+        inflight++;
+    }
+
+    /* Drain any remaining in-flight transfers */
+    while (inflight > 0)
+    {
+        if (tx_semaphore_get(&s_usb_xfer_sem, TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS)
+            break;
+        inflight--;
+    }
+
+feeder_exit:
+    tx_semaphore_put(&s_usb_done_sem);
+}
+
+/* Write n_bytes of PCM16 to the FIFO — non-blocking, never stalls the SAI thread. */
+static VOID sai_submit_pcm16_to_usb(const int16_t *pcm16, ULONG n_bytes)
+{
+    if (s_usb_audio == UX_NULL || s_usb_pkt_size == 0)
+        return;
+    usb_fifo_write((const UCHAR *)pcm16, n_bytes);
+}
+
+/* Start the USB feeder thread.  Called just before the SAI main loop. */
+static VOID sai_usb_prefill(VOID)
+{
+    if (s_usb_audio == UX_NULL || s_usb_pkt_size == 0)
+        return;
+    usb_fifo_reset();
+    s_usb_running      = 1U;
+    s_usb_frac_acc     = 0;
+    s_usb_thread_active = 0;
+    tx_semaphore_create(&s_usb_xfer_sem, "usb_xfer", 0);
+    tx_semaphore_create(&s_usb_done_sem, "usb_done", 0);
+    if (tx_thread_create(&s_usb_thread, "usb_feeder", usb_feeder_thread_entry,
+                         0, s_usb_stack, USB_FEEDER_STACK_SIZE,
+                         9, 9, TX_NO_TIME_SLICE, TX_AUTO_START) == TX_SUCCESS)
+        s_usb_thread_active = 1U;
+}
+
+/* Signal stop, wait for feeder thread to finish, then clean up. */
+static VOID sai_usb_drain(VOID)
+{
+    if (!s_usb_thread_active)
+        return;
+    s_usb_running = 0U;
+    (void)tx_semaphore_get(&s_usb_done_sem, 3 * TX_TIMER_TICKS_PER_SECOND);
+    tx_thread_terminate(&s_usb_thread);
+    tx_thread_delete(&s_usb_thread);
+    tx_semaphore_delete(&s_usb_xfer_sem);
+    tx_semaphore_delete(&s_usb_done_sem);
+    s_usb_thread_active = 0U;
+}
+
+/* Select USB alternate interface for the given format. */
+static VOID sai_usb_configure(ULONG sample_rate, UINT channels)
+{
+    if (s_usb_audio == UX_NULL)
+        return;
+    UX_HOST_CLASS_AUDIO_SAMPLING usb_smp;
+    usb_smp.ux_host_class_audio_sampling_channels   = channels;
+    usb_smp.ux_host_class_audio_sampling_frequency  = sample_rate;
+    usb_smp.ux_host_class_audio_sampling_resolution = 16;
+    if (ux_host_class_audio_streaming_sampling_set(s_usb_audio, &usb_smp) == UX_SUCCESS)
+        s_usb_pkt_size = ux_host_class_audio_packet_size_get(s_usb_audio);
+    else
+        s_usb_pkt_size = 0;
+    s_usb_sample_rate  = sample_rate;
+    s_usb_channels_num = channels;
+}
+#endif /* AUDIO_OUTPUT_SAI */
 
 /* Drain any stale semaphore counts left by an aborted stream. */
 static VOID ring_sem_flush(VOID)
@@ -912,10 +1185,12 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     ULONG file_size;
     FX_FILE audio_file;
     WAV_INFO wav_info;
+    FX_LOCAL_PATH local_path;
 
     s_audio_playback_abort = TX_FALSE;
-    s_audio_playback_active = TX_TRUE;
+    s_audio_playback_active_usb = TX_TRUE;
     tx_semaphore_create(&audio_xfer_semaphore, "audio_xfer_sem", 0);
+    fx_directory_local_path_set(media, &local_path, "/");
 
     while (1)
     {
@@ -966,7 +1241,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
     }
 
 done:
-    s_audio_playback_active = TX_FALSE;
+    s_audio_playback_active_usb = TX_FALSE;
     /* Do NOT call ux_host_class_audio_stop when:
        - s_audio_playback_abort is set: USBX already freed the instance on disconnect.
        - isochronous_endpoint is NULL: alt setting 0 was never activated (no transfers
@@ -979,7 +1254,7 @@ done:
 }
 
 #ifdef AUDIO_OUTPUT_SAI
-VOID audio_playback_sai_files(FX_MEDIA *media)
+VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
 {
     UINT  status;
     CHAR  entry_name[FX_MAX_LONG_NAME_LEN];
@@ -987,9 +1262,20 @@ VOID audio_playback_sai_files(FX_MEDIA *media)
     ULONG file_size;
     FX_FILE audio_file;
     WAV_INFO wav_info;
+    FX_LOCAL_PATH local_path;
+
+    s_usb_audio         = usb_audio;
+    s_usb_pkt_size      = 0;
+    s_usb_sample_rate   = 0;
+    s_usb_channels_num  = 0;
+    s_usb_frac_acc      = 0;
+    s_usb_running       = 0;
+    s_usb_thread_active = 0;
+    usb_fifo_reset();
 
     s_audio_playback_active = TX_TRUE;
     tx_semaphore_create(&sai_sem, "sai_sem", 0);
+    fx_directory_local_path_set(media, &local_path, "/");
 
     while (1)
     {
@@ -1029,6 +1315,11 @@ VOID audio_playback_sai_files(FX_MEDIA *media)
 
 sai_done:
     HAL_SAI_DMAStop(&hsai_BlockA1);
+    sai_usb_drain();
+    if (s_usb_audio != UX_NULL &&
+        s_usb_audio->ux_host_class_audio_isochronous_endpoint != UX_NULL)
+        (void)ux_host_class_audio_stop(s_usb_audio);
+    s_usb_audio = UX_NULL;
     s_audio_playback_active = TX_FALSE;
     tx_semaphore_delete(&sai_sem);
 }

@@ -59,8 +59,10 @@ VOID audio_playback_usb_disconnect_notify(VOID);
 /* TX_TRUE while audio_playback_wav_files() is using the SD media (defer remount/close). */
 UINT audio_playback_is_active(VOID);
 #ifdef AUDIO_OUTPUT_SAI
-/* SAI analogue output path — plays WAV/MP3 from SD card through the on-board I2S DAC. */
-VOID audio_playback_sai_files(FX_MEDIA *media);
+/* SAI analogue output path — plays WAV/MP3 from SD card through the on-board I2S DAC.
+   Pass usb_audio != NULL to simultaneously mirror audio to a USB speaker (dual output).
+   Pass UX_NULL for SAI-only mode. */
+VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio);
 #endif
 /* USER CODE END EFP */
 

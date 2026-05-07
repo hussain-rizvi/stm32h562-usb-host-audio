@@ -52,6 +52,21 @@ static TX_THREAD ux_host_app_thread;
 /* USER CODE BEGIN PV */
 static UX_HOST_CLASS_AUDIO *audio_speaker = UX_NULL;
 static TX_EVENT_FLAGS_GROUP audio_event_flags;
+
+#ifdef AUDIO_OUTPUT_SAI
+/* Independent USB audio thread — runs audio_playback_wav_files on the same
+   proven path as USB-only mode, completely decoupled from the SAI thread. */
+#define USB_AUDIO_THREAD_STACK_SIZE  32768U
+static UCHAR     s_usb_audio_stack[USB_AUDIO_THREAD_STACK_SIZE];
+static TX_THREAD s_usb_audio_thread;
+
+static VOID usb_audio_thread_entry(ULONG arg)
+{
+    (void)arg;
+    extern FX_MEDIA sdio_disk;
+    audio_playback_wav_files(audio_speaker, &sdio_disk);
+}
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -132,14 +147,28 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
     extern FX_MEDIA sdio_disk;
 
 #ifdef AUDIO_OUTPUT_SAI
-    /* SAI path: only wait for SD card, no USB speaker needed */
+    /* SAI path: wait for SD (mandatory), then give USB speaker up to 3 s to
+       enumerate.  If no speaker is found within the timeout, audio_speaker
+       stays NULL and SAI-only mode activates automatically. */
     ULONG sd_flags;
     extern I2C_HandleTypeDef hi2c1;
     tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
+    tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
+                       TX_AND, &sd_flags, 3 * TX_TIMER_TICKS_PER_SECOND);
     tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
     /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
     tad5112_init(&hi2c1);
-    audio_playback_sai_files(&sdio_disk);
+    /* If a USB speaker is connected, run it on a dedicated thread using the
+       same proven path as USB-only mode — completely independent of SAI. */
+    if (audio_speaker != UX_NULL)
+    {
+        tx_thread_create(&s_usb_audio_thread, "usb_audio",
+                         usb_audio_thread_entry, 0,
+                         s_usb_audio_stack, USB_AUDIO_THREAD_STACK_SIZE,
+                         10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
+    }
+    /* SAI plays independently — no USB involvement */
+    audio_playback_sai_files(&sdio_disk, UX_NULL);
 #else
     /* USB path: wait for both USB speaker and SD card */
     ULONG actual_flags;
