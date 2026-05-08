@@ -96,6 +96,10 @@ USHORT              port_status_change_bits;
     /* Search for an entry in the periodic tree.  */
     while (ed != UX_NULL)
     {
+        /* Reset per-ED so one endpoint's hub check cannot block a different
+           endpoint's submission in the same scheduler pass. */
+        ep_schedule = 1U;
+
 #if defined (USBH_HAL_HUB_SPLIT_SUPPORTED)
       if (hcd_stm32 -> hcd_handle -> hc[ed -> ux_stm32_ed_channel].do_ssplit == 1U)
       {
@@ -205,11 +209,6 @@ USHORT              port_status_change_bits;
           if (transfer_request && ed -> ux_stm32_ed_sch_mode)
           {
 
-            /* If it's scheduled each SOF/uSOF, the request should be submitted
-            * immediately after packet is done. This is performed in callback.  */
-            if (ed -> ux_stm32_ed_interval_mask == 0U)
-              ed -> ux_stm32_ed_sch_mode = 0U;
-
             /* For ISO OUT, packet size is from request variable,
             * otherwise, use request length.  */
             if ((ed -> ux_stm32_ed_type == EP_TYPE_ISOC) && (ed -> ux_stm32_ed_dir == 0U))
@@ -258,6 +257,13 @@ USHORT              port_status_change_bits;
 
             if ((endpoint->ux_endpoint_device->ux_device_state == UX_DEVICE_CONFIGURED) && (ep_schedule != 0U))
             {
+              /* Only clear sch_mode when the submit actually happens.  Clearing it
+                 before the hub check meant that if ep_schedule was set to 0 the
+                 endpoint was left with sch_mode=0 and no pending hardware request —
+                 a deadlock that silently dropped ISO frames each time a song started. */
+              if (ed -> ux_stm32_ed_interval_mask == 0U)
+                ed -> ux_stm32_ed_sch_mode = 0U;
+
               /* Call HAL driver to submit the transfer request.  */
               HAL_HCD_HC_SubmitRequest(hcd_stm32 -> hcd_handle, ed -> ux_stm32_ed_channel,
                                        ed -> ux_stm32_ed_dir,

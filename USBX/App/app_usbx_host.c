@@ -168,7 +168,7 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
                          10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
     }
     /* SAI plays independently — no USB involvement */
-    audio_playback_sai_files(&sdio_disk, UX_NULL);
+//    audio_playback_sai_files(&sdio_disk, UX_NULL);
 #else
     /* USB path: wait for both USB speaker and SD card */
     ULONG actual_flags;
@@ -199,7 +199,7 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
   UINT status = UX_SUCCESS;
 
   /* USER CODE BEGIN ux_host_event_callback0 */
-  UX_PARAMETER_NOT_USED(current_class);
+
   /* USER CODE END ux_host_event_callback0 */
 
   switch (event)
@@ -208,6 +208,14 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
 
       /* USER CODE BEGIN UX_DEVICE_INSERTION */
       {
+        /* Guard: hub, HID, and other class insertions also fire this callback
+           with a different current_instance type.  Only process audio. */
+        if (ux_utility_memory_compare(current_class->ux_host_class_name,
+                                      _ux_system_host_class_audio_name,
+                                      ux_utility_string_length_get(
+                                          _ux_system_host_class_audio_name)) != UX_SUCCESS)
+            break;
+
         UX_HOST_CLASS_AUDIO *audio_instance = (UX_HOST_CLASS_AUDIO *)current_instance;
 
         if (_ux_host_class_audio_subclass_get(audio_instance) ==
@@ -239,7 +247,11 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
     case UX_DEVICE_REMOVAL:
 
       /* USER CODE BEGIN UX_DEVICE_REMOVAL */
-      if ((UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
+      if (ux_utility_memory_compare(current_class->ux_host_class_name,
+                                    _ux_system_host_class_audio_name,
+                                    ux_utility_string_length_get(
+                                        _ux_system_host_class_audio_name)) == UX_SUCCESS &&
+          (UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
       {
         NVIC_SystemReset();
       }
@@ -346,6 +358,14 @@ UINT MX_USBX_Host_Stack_Init(void)
 
   /* Register a callback error function */
   ux_utility_error_callback_register(&ux_host_error_callback);
+  /* Initialize the host hub class */
+  if (ux_host_stack_class_register(_ux_system_host_class_hub_name,
+                                   ux_host_class_hub_entry) != UX_SUCCESS)
+  {
+    /* USER CODE BEGIN USBX_HOST_HUB_REGISTER_ERROR */
+    return UX_ERROR;
+    /* USER CODE END USBX_HOST_HUB_REGISTER_ERROR */
+  }
 
   /* Initialize the host audio class */
   if (ux_host_stack_class_register(_ux_system_host_class_audio_name,
@@ -394,6 +414,12 @@ UINT MX_USBX_Host_Stack_DeInit(void)
     if (ux_host_stack_hcd_unregister(_ux_system_host_hcd_stm32_name,
                                 USB_DRD_BASE,
                                (ULONG)&hhcd_USB_DRD_FS)!= UX_SUCCESS)
+  {
+    return UX_ERROR;
+  }
+
+  /* Unregister the host hub class */
+  if (ux_host_stack_class_unregister(ux_host_class_hub_entry) != UX_SUCCESS)
   {
     return UX_ERROR;
   }

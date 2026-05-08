@@ -420,15 +420,15 @@ UX_TRANSFER         *transfer_next;
 
             /* Handle URB_NOTREADY state here.  */
 
-            /* If interrupt transfer is not started by schedular, start here.  */
+            /* bInterval=1 interrupt endpoints (sch_mode=0) must NOT be retried immediately
+               on NAK.  Spinning on NAK fills the 1 ms USB frame with hundreds of short
+               transactions, starving any isochronous endpoint sharing the bus (e.g. USB
+               audio) and causing continuous audio frame drops / cracking.
+               Setting sch_mode=1 lets the SOF periodic scheduler fire exactly one IN token
+               per frame, which is what bInterval=1 actually means per the USB spec. */
             if ((!ed -> ux_stm32_ed_sch_mode) && (ed -> ux_stm32_ed_type == EP_TYPE_INTR))
             {
-              /* Call HAL driver to re-submit the transfer request.  */
-              HAL_HCD_HC_SubmitRequest(hcd_stm32 -> hcd_handle, ed -> ux_stm32_ed_channel,
-                                       ed -> ux_stm32_ed_dir,
-                                       ed -> ux_stm32_ed_type, USBH_PID_DATA,
-                                       ed -> ux_stm32_ed_data + transfer_request -> ux_transfer_request_actual_length,
-                                       ed -> ux_stm32_ed_packet_length, 0);
+              ed -> ux_stm32_ed_sch_mode = 1U;
             }
 
             /* Check if we need to retry the transfer by checking the status.  */
