@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <string.h>
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
@@ -274,6 +275,8 @@ void HAL_HCD_MspInit(HCD_HandleTypeDef* hhcd)
     /* USER CODE END USB_DRD_FS_MspInit 0 */
 
   /** Initializes the peripherals clock
+  * Try PLL3Q (HSE-derived, ±20 ppm) for accurate USB SOF timing.
+  * Falls back to HSI48 if PLL3 config fails; g_usb_clock_source records the outcome.
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
     PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;

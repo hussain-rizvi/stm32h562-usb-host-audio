@@ -30,6 +30,12 @@
 #include "ux_hcd_stm32.h"
 #include "ux_host_stack.h"
 
+/* Diagnostic: counts times ISO OUT callback submits transfer_next with
+   non-zero actual_length.  Non-zero means the fix in
+   _ux_host_class_audio_transfer_request (actual_length=0) was bypassed —
+   USB_WritePMA will read the wrong source offset → audible cracking.
+   Should stay at 0 during normal hub playback after the fix is applied. */
+volatile uint32_t g_iso_cb_nonzero_actual = 0;
 
 /**************************************************************************/
 /*                                                                        */
@@ -384,6 +390,13 @@ UX_TRANSFER         *transfer_next;
 
                     /* Prepare transactions.  */
                     _ux_hcd_stm32_request_trans_prepare(hcd_stm32, ed, transfer_next);
+
+                    /* Diagnostic: ISO OUT callback path — actual_length must be 0 here
+                       (reset by _ux_host_class_audio_transfer_request at queue time).
+                       Non-zero means data will be read from the wrong PMA source offset. */
+                    if ((ed -> ux_stm32_ed_type == EP_TYPE_ISOC) && (ed -> ux_stm32_ed_dir == 0) &&
+                        (transfer_next -> ux_transfer_request_actual_length != 0))
+                        g_iso_cb_nonzero_actual++;
 
                     /* Call HAL driver to submit the transfer request.  */
                     HAL_HCD_HC_SubmitRequest(hcd_stm32 -> hcd_handle, ed -> ux_stm32_ed_channel,

@@ -75,6 +75,13 @@
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
+/* Hub-check block counter: incremented each time the hub port-change check
+   sets ep_schedule=0 for an ISO OUT endpoint during normal audio playback.
+   Inspect in debugger after ~10 s of hub playback; should stay at 0.
+   A rising value means the hub INTR IN has non-zero actual_length and the
+   port-change bits show the audio device's port — this blocks ISO OUT frames. */
+volatile uint32_t g_ep_schedule_block_count = 0;
+
 UINT  _ux_hcd_stm32_periodic_schedule(UX_HCD_STM32 *hcd_stm32)
 {
 
@@ -250,6 +257,7 @@ USHORT              port_status_change_bits;
                   if ((port_status_change_bits & (0x1U << endpoint->ux_endpoint_device->ux_device_port_location)) != 0U)
                   {
                     ep_schedule = 0U;
+                    g_ep_schedule_block_count++;
                   }
                 }
               }

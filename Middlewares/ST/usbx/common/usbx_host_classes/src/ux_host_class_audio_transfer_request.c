@@ -95,6 +95,7 @@ UX_TRANSFER     *transfer_request;
     transfer_request -> ux_transfer_request_data_pointer =          audio_transfer_request -> ux_host_class_audio_transfer_request_data_pointer;
     transfer_request -> ux_transfer_request_requested_length =      audio_transfer_request -> ux_host_class_audio_transfer_request_requested_length;
     transfer_request -> ux_transfer_request_packet_length =         audio_transfer_request -> ux_host_class_audio_transfer_request_packet_size;
+    transfer_request -> ux_transfer_request_actual_length =         0;
     transfer_request -> ux_transfer_request_completion_function =   _ux_host_class_audio_transfer_request_completed;
     transfer_request -> ux_transfer_request_class_instance =        audio;
     transfer_request -> ux_transfer_request_next_transfer_request = UX_NULL; /* Add one by one.  */

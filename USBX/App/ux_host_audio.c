@@ -81,9 +81,21 @@ static volatile UINT s_audio_playback_abort;
 
 /* ISO completion diagnostics — inspect in debugger after ~10 s of playback.
    g_iso_complete_count should grow at ~1000/sec (one per USB frame).
-   g_iso_stall_50ms_count > 0 means the ISO pipeline stalled (no completions for 50 ms). */
+   g_iso_stall_50ms_count > 0 means the ISO pipeline stalled (no completions for 50 ms).
+   g_iso_error_count: completions with non-UX_SUCCESS code (signal integrity / dropped ISO). */
 volatile uint32_t g_iso_complete_count = 0;
 volatile uint32_t g_iso_stall_50ms_count = 0;
+volatile uint32_t g_iso_error_count = 0;
+/* 0 = PLL3Q active, 1 = PLL3Q config failed (HAL_ERROR), 2 = timeout, 3 = busy, 0xFF = not attempted */
+volatile uint32_t g_usb_clock_source = 0xFF;
+
+/* Hub-specific diagnostics (hub connection only).
+   g_ep_schedule_block_count: SOF frames where the hub port-change check blocked
+     ISO OUT — should be 0 during normal playback (hub actual_length == 0).
+   g_iso_cb_nonzero_actual: times the callback-path ISO OUT submit had non-zero
+     actual_length — should be 0 after the actual_length fix is in place. */
+extern volatile uint32_t g_ep_schedule_block_count;
+extern volatile uint32_t g_iso_cb_nonzero_actual;
 
 /* Separate active flags so SAI and USB threads can run concurrently without
    one clearing the other's flag and allowing FileX to close the media early. */
@@ -173,6 +185,8 @@ static mp3d_sample_t s_mp3_pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
 static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
     g_iso_complete_count++;
+    if (xfer->ux_host_class_audio_transfer_request_completion_code != UX_SUCCESS)
+        g_iso_error_count++;
     tx_semaphore_put(&audio_xfer_semaphore);
 }
 
