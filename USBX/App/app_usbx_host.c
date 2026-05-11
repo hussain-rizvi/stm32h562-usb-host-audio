@@ -168,7 +168,7 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
                          10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
     }
     /* SAI plays independently — no USB involvement */
-//    audio_playback_sai_files(&sdio_disk, UX_NULL);
+    audio_playback_sai_files(&sdio_disk, UX_NULL);
 #else
     /* USB path: wait for both USB speaker and SD card */
     ULONG actual_flags;
