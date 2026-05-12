@@ -53,20 +53,6 @@ static TX_THREAD ux_host_app_thread;
 static UX_HOST_CLASS_AUDIO *audio_speaker = UX_NULL;
 static TX_EVENT_FLAGS_GROUP audio_event_flags;
 
-#ifdef AUDIO_OUTPUT_SAI
-/* Independent USB audio thread — runs audio_playback_wav_files on the same
-   proven path as USB-only mode, completely decoupled from the SAI thread. */
-#define USB_AUDIO_THREAD_STACK_SIZE  32768U
-static UCHAR     s_usb_audio_stack[USB_AUDIO_THREAD_STACK_SIZE];
-static TX_THREAD s_usb_audio_thread;
-
-static VOID usb_audio_thread_entry(ULONG arg)
-{
-    (void)arg;
-    extern FX_MEDIA sdio_disk;
-    audio_playback_wav_files(audio_speaker, &sdio_disk);
-}
-#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -167,16 +153,7 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
       /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
       tad5112_init(&hi2c1);
-      /* If a USB speaker is connected, run it on a dedicated thread using the
-         same proven path as USB-only mode — completely independent of SAI. */
-      if (audio_speaker != UX_NULL)
-      {
-          tx_thread_create(&s_usb_audio_thread, "usb_audio",
-                           usb_audio_thread_entry, 0,
-                           s_usb_audio_stack, USB_AUDIO_THREAD_STACK_SIZE,
-                           10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
-      }
-      /* SAI plays independently — no USB involvement */
+      /* SAI-only mode — no USB thread. PA4 toggle selects SAI or USB, not both. */
       audio_playback_sai_files(&sdio_disk, UX_NULL);
     }
     else

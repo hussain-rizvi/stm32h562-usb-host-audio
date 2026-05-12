@@ -210,10 +210,7 @@ void EXTI6_IRQHandler(void)
 void EXTI7_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI7_IRQn 0 */
-  /* EXTI7 is mapped to PA7 (volume-down). Call with GPIO_PIN_7 and return before the
-     generated SD_CD_Pin call so this stays correct after CubeMX regeneration. */
-  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_7);
-  return;
+
   /* USER CODE END EXTI7_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(SD_CD_Pin);
   /* USER CODE BEGIN EXTI7_IRQn 1 */

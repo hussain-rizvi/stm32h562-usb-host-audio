@@ -131,10 +131,13 @@ extern TX_SEMAPHORE sd_rx_semaphore;
 /* Define how to notify about Read completion operation */
 /* USER CODE BEGIN FX_STM32_SD_READ_CPLT_NOTIFY_TX */
 
+/* 2-second timeout: far longer than any valid DMA read, short enough to recover
+   quickly if the card is removed and neither HAL_SD_ErrorCallback nor EXTI7 fires
+   first.  Reset instead of returning FX_IO_ERROR so the app remounts cleanly. */
 #define FX_STM32_SD_READ_CPLT_NOTIFY()                  do { \
-                                                          if(tx_semaphore_get(&sd_rx_semaphore, FX_STM32_SD_DEFAULT_TIMEOUT) != TX_SUCCESS) \
+                                                          if(tx_semaphore_get(&sd_rx_semaphore, 2 * TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS) \
                                                             { \
-                                                              return FX_IO_ERROR; \
+                                                              NVIC_SystemReset(); \
                                                             } \
                                                         } while(0)
 
@@ -144,9 +147,9 @@ extern TX_SEMAPHORE sd_rx_semaphore;
 /* USER CODE BEGIN FX_STM32_SD_WRITE_CPLT_NOTIFY_TX */
 
 #define FX_STM32_SD_WRITE_CPLT_NOTIFY()                 do { \
-                                                          if(tx_semaphore_get(&sd_tx_semaphore, FX_STM32_SD_DEFAULT_TIMEOUT) != TX_SUCCESS) \
+                                                          if(tx_semaphore_get(&sd_tx_semaphore, 2 * TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS) \
                                                             { \
-                                                              return FX_IO_ERROR; \
+                                                              NVIC_SystemReset(); \
                                                             } \
                                                         } while(0)
 

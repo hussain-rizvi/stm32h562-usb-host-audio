@@ -85,6 +85,12 @@ INT fx_stm32_sd_get_status(UINT instance)
 
   /* USER CODE BEGIN PRE_GET_STATUS */
   UNUSED(instance);
+  /* check_sd_status() calls this in a tight spin loop (no tx_thread_sleep).
+     Detect physical removal via GPIO here so the spin exits in < 1 ms instead
+     of holding the CPU for 10 s and starving the app_filex polling thread. */
+  extern uint8_t SD_CardIsPresent(void);
+  if (SD_CardIsPresent() == 0U)
+      NVIC_SystemReset();
   /* USER CODE END PRE_GET_STATUS */
 
   if(HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
@@ -193,5 +199,12 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
 }
 
 /* USER CODE BEGIN 1 */
-
+void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
+{
+    (void)hsd;
+    /* Any SDMMC error (card removal, DMA abort) is unrecoverable during audio playback.
+       Reset immediately so app_filex can remount on card re-insertion, instead of
+       waiting up to 10 s for the DMA semaphore to time out per blocked read call. */
+    NVIC_SystemReset();
+}
 /* USER CODE END 1 */

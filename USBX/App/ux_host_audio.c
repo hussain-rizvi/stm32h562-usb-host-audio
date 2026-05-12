@@ -91,6 +91,27 @@ static int32_t         s_usb_vol_max    = 0;
 static int32_t         s_usb_vol_step   = 256 * 3;  /* 3 dB default, updated from res */
 static ULONG           s_usb_vol_entity = 0;
 
+/* Hold-to-repeat volume: fires once on first press, then repeats every VOL_REPEAT_MS
+   after VOL_HOLD_DELAY_MS of continuous hold. Shared across all streaming contexts. */
+#define VOL_HOLD_DELAY_MS  400U
+#define VOL_REPEAT_MS       80U
+static uint32_t s_vol_pa6_press_ms = 0, s_vol_pa6_last_ms = 0;
+static uint32_t s_vol_pa7_press_ms = 0, s_vol_pa7_last_ms = 0;
+
+#define POLL_VOL_BUTTONS() do { \
+    uint32_t _t = HAL_GetTick(); \
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6) == GPIO_PIN_SET) { \
+        if (!s_vol_pa6_press_ms) { audio_vol_down(); s_vol_pa6_press_ms = _t ? _t : 1U; s_vol_pa6_last_ms = _t; } \
+        else if ((_t - s_vol_pa6_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa6_last_ms) >= VOL_REPEAT_MS) \
+            { audio_vol_down(); s_vol_pa6_last_ms = _t; } \
+    } else { s_vol_pa6_press_ms = 0; } \
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7) == GPIO_PIN_SET) { \
+        if (!s_vol_pa7_press_ms) { audio_vol_up(); s_vol_pa7_press_ms = _t ? _t : 1U; s_vol_pa7_last_ms = _t; } \
+        else if ((_t - s_vol_pa7_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa7_last_ms) >= VOL_REPEAT_MS) \
+            { audio_vol_up(); s_vol_pa7_last_ms = _t; } \
+    } else { s_vol_pa7_press_ms = 0; } \
+} while(0)
+
 /* Separate active flags so SAI and USB threads can run concurrently without
    one clearing the other's flag and allowing FileX to close the media early. */
 static volatile UINT s_audio_playback_active;      /* SAI path */
@@ -566,6 +587,10 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
 
+        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
+
+        POLL_VOL_BUTTONS();
+
         if (s_skip_track) { s_skip_track = 0; break; }
 
         tad5112_vol_apply();
@@ -685,6 +710,10 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     {
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
+
+        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
+
+        POLL_VOL_BUTTONS();
 
         if (s_skip_track) { s_skip_track = 0; break; }
 
@@ -1008,16 +1037,37 @@ static VOID usb_vol_apply(UX_HOST_CLASS_AUDIO *audio)
         ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
         ctrl.ux_host_class_audio_control_channel = 0;
         ctrl.ux_host_class_audio_control_entity  = audio->ux_host_class_audio_feature_unit_id;
+
+        /* GET_CUR only — ux_host_class_audio_control_value_get fills _cur only */
         if (ux_host_class_audio_control_value_get(audio, &ctrl) != UX_SUCCESS)
             return;
-        /* ULONG fields carry 16-bit signed values for volume — sign-extend */
-        s_usb_vol_cur    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_cur;
-        s_usb_vol_min    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_min;
-        s_usb_vol_max    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_max;
-        ULONG res        = ctrl.ux_host_class_audio_control_res;
-        if (res > 0U && res < 0x8000U)
-            s_usb_vol_step = (int32_t)res * 3;  /* 3 × resolution per press ≈ 3 dB */
-        s_usb_vol_entity = ctrl.ux_host_class_audio_control_entity;
+        s_usb_vol_cur = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_cur;
+
+        /* GET_MIN/GET_MAX/GET_RES — separate call fills _min/_max/_res */
+        {
+            UX_HOST_CLASS_AUDIO_CONTROL range_ctrl = {0};
+            range_ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+            range_ctrl.ux_host_class_audio_control_channel = 0;
+            range_ctrl.ux_host_class_audio_control_entity  = audio->ux_host_class_audio_feature_unit_id;
+            if (ux_host_class_audio_control_get(audio, &range_ctrl) == UX_SUCCESS)
+            {
+                s_usb_vol_min = (int32_t)(int16_t)(uint16_t)range_ctrl.ux_host_class_audio_control_min;
+                s_usb_vol_max = (int32_t)(int16_t)(uint16_t)range_ctrl.ux_host_class_audio_control_max;
+                ULONG res     = range_ctrl.ux_host_class_audio_control_res;
+                if (res > 0U && res < 0x8000U)
+                    s_usb_vol_step = (int32_t)res;  /* 1 × resolution per repeat step */
+            }
+        }
+
+        /* Fallback: if device returned degenerate bounds (both 0), use a safe range.
+           Without this, clamping immediately pins s_usb_vol_cur to 0 on every press. */
+        if (s_usb_vol_min >= s_usb_vol_max)
+        {
+            s_usb_vol_min = -127 * 256;  /* -127 dB */
+            s_usb_vol_max = 0;            /* 0 dB */
+        }
+
+        s_usb_vol_entity = audio->ux_host_class_audio_feature_unit_id;
         s_usb_vol_init   = 1;
     }
 
@@ -1025,11 +1075,15 @@ static VOID usb_vol_apply(UX_HOST_CLASS_AUDIO *audio)
     if (s_usb_vol_cur < s_usb_vol_min) s_usb_vol_cur = s_usb_vol_min;
     if (s_usb_vol_cur > s_usb_vol_max) s_usb_vol_cur = s_usb_vol_max;
 
+    /* Send to left (ch1) and right (ch2) separately — many devices ignore master ch0 */
     UX_HOST_CLASS_AUDIO_CONTROL set_ctrl = {0};
-    set_ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
-    set_ctrl.ux_host_class_audio_control_channel = 0;
-    set_ctrl.ux_host_class_audio_control_entity  = s_usb_vol_entity;
-    set_ctrl.ux_host_class_audio_control_cur     = (ULONG)(uint16_t)(int16_t)s_usb_vol_cur;
+    set_ctrl.ux_host_class_audio_control     = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+    set_ctrl.ux_host_class_audio_control_cur = (ULONG)(uint16_t)(int16_t)s_usb_vol_cur;
+
+    set_ctrl.ux_host_class_audio_control_channel = 1;
+    ux_host_class_audio_control_value_set(audio, &set_ctrl);
+
+    set_ctrl.ux_host_class_audio_control_channel = 2;
     ux_host_class_audio_control_value_set(audio, &set_ctrl);
 }
 
@@ -1093,6 +1147,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         if (s_skip_track) { s_skip_track = 0; goto done; }
 
+        POLL_VOL_BUTTONS();
         usb_vol_apply(audio);
 
         if (s_playback_paused)
@@ -1173,6 +1228,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
     {
         if (s_skip_track) { s_skip_track = 0; break; }
 
+        POLL_VOL_BUTTONS();
         usb_vol_apply(audio);
 
         if (s_playback_paused)
@@ -1412,6 +1468,7 @@ VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
 
     while (1)
     {
+        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
         status = fx_directory_first_entry_find(media, entry_name);
         if (status != FX_SUCCESS && status != FX_NO_MORE_ENTRIES)
             goto sai_done;

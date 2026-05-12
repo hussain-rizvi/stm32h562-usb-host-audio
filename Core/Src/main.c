@@ -100,7 +100,18 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* Enable TAMP/RTC APB clock and backup-domain write access early — before
+     any EXTI can fire and before the app thread reads BKP0R for mode selection. */
+  __HAL_RCC_RTC_CLK_ENABLE();
+  HAL_PWR_EnableBkUpAccess();
+  /* First-write warm-up: on a cold power-on BKP0R = 0.  The very first write
+     that is immediately followed by NVIC_SystemReset() does not survive on
+     STM32H5 because the backup domain has not yet been "touched" in this
+     power cycle.  Writing the SAI sentinel here (before any reset occurs)
+     initialises the backup domain so the subsequent PA4 callback write persists.
+     If BKP0R is already non-zero the device was just reset — leave it alone. */
+  if (TAMP->BKP0R == 0U)
+      TAMP->BKP0R = 0x5A000001U;   /* SAI mode default */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -466,17 +477,20 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* PA7 = volume-down button on EXTI7.
-     Must run AFTER the generated SD_CD EXTI7 init so PA7 wins the EXTI7 mux (SYSCFG_EXTICR → GPIOA).
-     SD removal is polled by app_filex.c; no interrupt needed for PC7. */
-  GPIO_InitStruct.Pin = GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-  /* Downgrade SD_CD (PC7) to plain input — EXTI7 now belongs to PA7. */
-  GPIO_InitStruct.Pin = SD_CD_Pin;
+  /* PA6 (vol up) and PA7 (vol down) — plain inputs, polled in audio loops.
+     Disabling EXTI6 NVIC prevents double-fire: generated code enables it for PA6
+     as EXTI6, but we poll instead so the interrupt must be masked. */
+  GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_NVIC_DisableIRQ(EXTI6_IRQn);
+  /* SD_CD (PC7): override generated NOPULL with internal pull-up so the pin
+     rises cleanly when the card is removed and the CD switch opens. Without a
+     pull-up the pin floats and EXTI7 IT_RISING never fires reliably. */
+  GPIO_InitStruct.Pin  = SD_CD_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
@@ -491,18 +505,21 @@ uint8_t SD_CardIsPresent(void)
 
 /* PA4: toggle SAI/USB output mode (persists via TAMP backup register, resets device).
    PA5: single press = play/pause; double press within 500 ms = next track.
-   PA6: volume up (3 dB per press).
-   PA7: volume down (3 dB per press).
-   NOTE: PA7 shares EXTI7 with SD_CD_Pin (PC7). PA7 wins the EXTI7 mapping so
-         SD card removal is no longer detected via interrupt — it is detected
-         through SDMMC errors during file operations instead. */
+   PA6/PA7: volume up/down — plain inputs, polled every ~21 ms in audio loops.
+   PC7: SD_CD card-detect — rising edge (card removed) → NVIC_SystemReset (EXTI7). */
+#define BTN_DEBOUNCE_MS      20U
 #define BTN_DOUBLE_PRESS_MS  500U
+static volatile uint32_t s_btn4_last_ms = 0;
 static volatile uint32_t s_btn5_last_ms = 0;
 
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_4)
   {
+    uint32_t now = HAL_GetTick();
+    if (now - s_btn4_last_ms < BTN_DEBOUNCE_MS) return;
+    s_btn4_last_ms = now;
+    __HAL_RCC_RTC_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
     TAMP->BKP0R = (TAMP->BKP0R == 0x5A000002U) ? 0x5A000001U : 0x5A000002U;
     NVIC_SystemReset();
@@ -510,7 +527,11 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   else if (GPIO_Pin == GPIO_PIN_5)
   {
     uint32_t now = HAL_GetTick();
-    if (s_btn5_last_ms != 0 && (now - s_btn5_last_ms) < BTN_DOUBLE_PRESS_MS)
+    /* elapsed = time since last confirmed press; treat unset (0) as > double-press window */
+    uint32_t elapsed = (s_btn5_last_ms != 0U) ? (now - s_btn5_last_ms)
+                                               : (BTN_DOUBLE_PRESS_MS + 1U);
+    if (elapsed < BTN_DEBOUNCE_MS) return;  /* bounce — ignore */
+    if (elapsed < BTN_DOUBLE_PRESS_MS)
     {
       audio_play_pause();   /* undo pause from first press */
       audio_skip_track();
@@ -522,13 +543,12 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
       s_btn5_last_ms = now;
     }
   }
-  else if (GPIO_Pin == GPIO_PIN_6)
-  {
-    audio_vol_up();
-  }
   else if (GPIO_Pin == GPIO_PIN_7)
   {
-    audio_vol_down();
+    /* PC7/SD_CD: confirm removal by reading pin back — genuine removal keeps
+       the pin HIGH (pull-up wins); a glitch has already returned LOW. */
+    if (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == GPIO_PIN_SET)
+      NVIC_SystemReset();
   }
 }
 

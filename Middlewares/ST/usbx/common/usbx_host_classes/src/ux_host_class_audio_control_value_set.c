@@ -220,7 +220,8 @@ UCHAR *         control_buffer;
         D8: Bass Boost          1
         D9: Loudness            1
         */
-        if ((audio_control -> ux_host_class_audio_control == UX_HOST_CLASS_AUDIO_MUTE_CONTROL) ||
+        /* USB Audio 1.0 spec Table 5-18: Volume=INT16(2B), Delay=UINT16(2B); all others ≤1B. */
+        if ((audio_control -> ux_host_class_audio_control == UX_HOST_CLASS_AUDIO_VOLUME_CONTROL) ||
             (audio_control -> ux_host_class_audio_control == UX_HOST_CLASS_AUDIO_DELAY_CONTROL))
             transfer_request -> ux_transfer_request_requested_length =  2;
         else if ((audio_control -> ux_host_class_audio_control <= 9) &&
