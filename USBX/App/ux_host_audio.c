@@ -79,6 +79,18 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 /* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
 static volatile UINT s_audio_playback_abort;
 
+static volatile UINT s_skip_track     = 0;  /* set by PA5 double-press */
+static volatile UINT s_playback_paused = 0;  /* set by PA5 single-press */
+
+/* USB speaker volume state — probe min/max/res once on first press, track internally */
+static volatile int8_t s_usb_vol_delta  = 0;
+static UINT            s_usb_vol_init   = 0;
+static int32_t         s_usb_vol_cur    = 0;
+static int32_t         s_usb_vol_min    = 0;
+static int32_t         s_usb_vol_max    = 0;
+static int32_t         s_usb_vol_step   = 256 * 3;  /* 3 dB default, updated from res */
+static ULONG           s_usb_vol_entity = 0;
+
 /* Separate active flags so SAI and USB threads can run concurrently without
    one clearing the other's flag and allowing FileX to close the media early. */
 static volatile UINT s_audio_playback_active;      /* SAI path */
@@ -150,6 +162,28 @@ static UINT drain_read(FX_FILE *f, UCHAR *dst, ULONG want, ULONG *got_out)
 VOID audio_playback_usb_disconnect_notify(VOID)
 {
     s_audio_playback_abort = TX_TRUE;
+}
+
+VOID audio_skip_track(VOID)
+{
+    s_skip_track = TX_TRUE;
+}
+
+VOID audio_play_pause(VOID)
+{
+    s_playback_paused = !s_playback_paused;
+}
+
+VOID audio_vol_up(VOID)
+{
+    tad5112_vol_up();
+    s_usb_vol_delta++;
+}
+
+VOID audio_vol_down(VOID)
+{
+    tad5112_vol_down();
+    s_usb_vol_delta--;
 }
 
 UINT audio_playback_is_active(VOID)
@@ -532,7 +566,17 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
 
+        if (s_skip_track) { s_skip_track = 0; break; }
+
+        tad5112_vol_apply();
+
         int32_t *half = sai_fill_upper ? (sai_dma_buf + half_cnt) : sai_dma_buf;
+
+        if (s_playback_paused)
+        {
+            memset(half, 0, half_cnt * sizeof(int32_t));
+            continue;
+        }
 
         if (remaining > 0U)
         {
@@ -642,7 +686,18 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
 
+        if (s_skip_track) { s_skip_track = 0; break; }
+
+        tad5112_vol_apply();
+
         int32_t *half = sai_fill_upper ? (sai_dma_buf + half_cnt) : sai_dma_buf;
+
+        if (s_playback_paused)
+        {
+            memset(half, 0, half_cnt * sizeof(int32_t));
+            continue;
+        }
+
         had_data = sai_fill_half_mp3(half, half_cnt, file,
                                       &mp3_size, &mp3_eof, &pcm_smp, &pcm_off, &sampling_set);
         if (s_usb_audio != UX_NULL && s_usb_pkt_size > 0)
@@ -939,6 +994,45 @@ static VOID ring_drain_inflight(UINT inflight)
     }
 }
 
+/* Apply any pending USB volume delta. Probes min/max/res on first call.
+   Runs the USB control transfer inline — only fires when s_usb_vol_delta != 0. */
+static VOID usb_vol_apply(UX_HOST_CLASS_AUDIO *audio)
+{
+    int8_t d = s_usb_vol_delta;
+    if (d == 0) return;
+    s_usb_vol_delta = 0;
+
+    if (!s_usb_vol_init)
+    {
+        UX_HOST_CLASS_AUDIO_CONTROL ctrl = {0};
+        ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+        ctrl.ux_host_class_audio_control_channel = 0;
+        ctrl.ux_host_class_audio_control_entity  = audio->ux_host_class_audio_feature_unit_id;
+        if (ux_host_class_audio_control_value_get(audio, &ctrl) != UX_SUCCESS)
+            return;
+        /* ULONG fields carry 16-bit signed values for volume — sign-extend */
+        s_usb_vol_cur    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_cur;
+        s_usb_vol_min    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_min;
+        s_usb_vol_max    = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_max;
+        ULONG res        = ctrl.ux_host_class_audio_control_res;
+        if (res > 0U && res < 0x8000U)
+            s_usb_vol_step = (int32_t)res * 3;  /* 3 × resolution per press ≈ 3 dB */
+        s_usb_vol_entity = ctrl.ux_host_class_audio_control_entity;
+        s_usb_vol_init   = 1;
+    }
+
+    s_usb_vol_cur += (int32_t)d * s_usb_vol_step;
+    if (s_usb_vol_cur < s_usb_vol_min) s_usb_vol_cur = s_usb_vol_min;
+    if (s_usb_vol_cur > s_usb_vol_max) s_usb_vol_cur = s_usb_vol_max;
+
+    UX_HOST_CLASS_AUDIO_CONTROL set_ctrl = {0};
+    set_ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+    set_ctrl.ux_host_class_audio_control_channel = 0;
+    set_ctrl.ux_host_class_audio_control_entity  = s_usb_vol_entity;
+    set_ctrl.ux_host_class_audio_control_cur     = (ULONG)(uint16_t)(int16_t)s_usb_vol_cur;
+    ux_host_class_audio_control_value_set(audio, &set_ctrl);
+}
+
 static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO *info)
 {
     UINT status = UX_SUCCESS;
@@ -969,6 +1063,8 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
     /* ---- Phase 1: pre-fill AUDIO_INFLIGHT slots before entering steady state ---- */
     while (inflight < AUDIO_INFLIGHT && remaining > 0)
     {
+        if (s_skip_track) { s_skip_track = 0; goto done; }
+
         to_read = (remaining > packet_size) ? packet_size : remaining;
         status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
         if (status != FX_SUCCESS || bytes_read == 0)
@@ -995,13 +1091,25 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
             goto done;
         inflight--;
 
-        to_read = (remaining > packet_size) ? packet_size : remaining;
-        status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
-        if (status != FX_SUCCESS || bytes_read == 0)
-            goto done;
+        if (s_skip_track) { s_skip_track = 0; goto done; }
 
-        if (bytes_read < packet_size)
-            memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+        usb_vol_apply(audio);
+
+        if (s_playback_paused)
+        {
+            memset(audio_ring_buf[wr], 0, packet_size);
+        }
+        else
+        {
+            to_read = (remaining > packet_size) ? packet_size : remaining;
+            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            if (status != FX_SUCCESS || bytes_read == 0)
+                goto done;
+
+            if (bytes_read < packet_size)
+                memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+            remaining -= to_read;
+        }
 
         status = ring_submit(audio, wr, packet_size);
         if (status != UX_SUCCESS)
@@ -1009,7 +1117,6 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         wr = (wr + 1U) % AUDIO_RING_SLOTS;
         inflight++;
-        remaining -= to_read;
     }
 
 done:
@@ -1064,6 +1171,32 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
     while (1)
     {
+        if (s_skip_track) { s_skip_track = 0; break; }
+
+        usb_vol_apply(audio);
+
+        if (s_playback_paused)
+        {
+            if (sampling_set && packet_size > 0)
+            {
+                if (inflight == AUDIO_INFLIGHT)
+                {
+                    status = audio_wait_xfer_done();
+                    if (status != UX_SUCCESS) goto mp3_done;
+                    inflight--;
+                }
+                memset(audio_ring_buf[wr], 0, packet_size);
+                (void)ring_submit(audio, wr, packet_size);
+                wr = (wr + 1U) % AUDIO_RING_SLOTS;
+                inflight++;
+            }
+            else
+            {
+                tx_thread_sleep(1);
+            }
+            continue;
+        }
+
         /* Refill the MP3 input window whenever it drops below one max frame.
            drain_read buffers 4 KB chunks from SD so the refill rarely stalls
            on a raw fx_file_read — same benefit the WAV path gets. */

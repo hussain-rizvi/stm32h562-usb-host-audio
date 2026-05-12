@@ -139,7 +139,7 @@
 /* Defines the maximum number of logical sectors that can be cached by FileX. The cache memory
    supplied to FileX at fx_media_open determines how many sectors can actually be cached.  */
 
-//#define FX_MAX_SECTOR_CACHE       0
+/* #define FX_MAX_SECTOR_CACHE         256 */
 
 /* Defined, the file search cache optimization is disabled.  */
 

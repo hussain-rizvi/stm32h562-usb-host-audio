@@ -63,6 +63,7 @@ uint8_t SD_CardIsPresent(void);
 #define SD_EN_GPIO_Port GPIOB
 #define SD_CD_Pin GPIO_PIN_7
 #define SD_CD_GPIO_Port GPIOC
+#define SD_CD_EXTI_IRQn EXTI7_IRQn
 
 /* USER CODE BEGIN Private defines */
 /* Define AUDIO_OUTPUT_SAI to route playback through the on-board I2S DAC (SAI1).

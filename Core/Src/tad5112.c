@@ -14,7 +14,14 @@
 #define TAD5112_VOL_0DB  201U
 #define TAD5112_VOL_MUTE 0x00U
 
+/* val = 201 + (gain_dB * 2);  step of 6 = 3 dB per press */
+#define TAD5112_VOL_MIN   21U   /* ~-90 dB */
+#define TAD5112_VOL_MAX  221U   /* ~+10 dB */
+#define TAD5112_VOL_STEP   6U   /* 3 dB    */
+
 static I2C_HandleTypeDef *s_hi2c;
+static uint8_t           s_vol       = TAD5112_VOL_0DB;
+static volatile int8_t   s_vol_delta = 0;
 
 static void vol_write(uint8_t val)
 {
@@ -60,7 +67,22 @@ HAL_StatusTypeDef tad5112_init(I2C_HandleTypeDef *hi2c)
 }
 
 void tad5112_mute(void)   { vol_write(TAD5112_VOL_MUTE); }
-void tad5112_unmute(void) { vol_write(TAD5112_VOL_0DB);  }
+void tad5112_unmute(void) { vol_write(s_vol); }
+
+void tad5112_vol_up(void)   { s_vol_delta++; }
+void tad5112_vol_down(void) { s_vol_delta--; }
+
+void tad5112_vol_apply(void)
+{
+    int8_t d = s_vol_delta;
+    if (d == 0) return;
+    s_vol_delta = 0;
+    int16_t v = (int16_t)s_vol + (int16_t)d * (int16_t)TAD5112_VOL_STEP;
+    if (v < (int16_t)TAD5112_VOL_MIN) v = (int16_t)TAD5112_VOL_MIN;
+    if (v > (int16_t)TAD5112_VOL_MAX) v = (int16_t)TAD5112_VOL_MAX;
+    s_vol = (uint8_t)v;
+    vol_write(s_vol);
+}
 
 void tad5112_sleep(void)
 {

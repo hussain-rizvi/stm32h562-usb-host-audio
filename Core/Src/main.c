@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "tad5112.h"
+#include "ux_host_audio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -425,12 +426,18 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, MUTE_Pin|SD_EN_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : PA4 PA5 PA6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : MUTE_Pin SD_EN_Pin */
   GPIO_InitStruct.Pin = MUTE_Pin|SD_EN_Pin;
@@ -442,13 +449,35 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : SD_CD_Pin */
   GPIO_InitStruct.Pin = SD_CD_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
-  HAL_NVIC_SetPriority(EXTI7_IRQn, 7, 0);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI5_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI6_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI7_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  /* PA7 = volume-down button on EXTI7.
+     Must run AFTER the generated SD_CD EXTI7 init so PA7 wins the EXTI7 mux (SYSCFG_EXTICR → GPIOA).
+     SD removal is polled by app_filex.c; no interrupt needed for PC7. */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  /* Downgrade SD_CD (PC7) to plain input — EXTI7 now belongs to PA7. */
+  GPIO_InitStruct.Pin = SD_CD_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -460,12 +489,47 @@ uint8_t SD_CardIsPresent(void)
   return (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == SD_CD_INSERTED_LEVEL) ? 1U : 0U;
 }
 
-/* SD card removal detected instantly via GPIO interrupt — no polling delay,
-   no SDMMC timeout wait. Rising edge = SD_CD goes HIGH = card removed. */
+/* PA4: toggle SAI/USB output mode (persists via TAMP backup register, resets device).
+   PA5: single press = play/pause; double press within 500 ms = next track.
+   PA6: volume up (3 dB per press).
+   PA7: volume down (3 dB per press).
+   NOTE: PA7 shares EXTI7 with SD_CD_Pin (PC7). PA7 wins the EXTI7 mapping so
+         SD card removal is no longer detected via interrupt — it is detected
+         through SDMMC errors during file operations instead. */
+#define BTN_DOUBLE_PRESS_MS  500U
+static volatile uint32_t s_btn5_last_ms = 0;
+
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == SD_CD_Pin)
+  if (GPIO_Pin == GPIO_PIN_4)
+  {
+    HAL_PWR_EnableBkUpAccess();
+    TAMP->BKP0R = (TAMP->BKP0R == 0x5A000002U) ? 0x5A000001U : 0x5A000002U;
     NVIC_SystemReset();
+  }
+  else if (GPIO_Pin == GPIO_PIN_5)
+  {
+    uint32_t now = HAL_GetTick();
+    if (s_btn5_last_ms != 0 && (now - s_btn5_last_ms) < BTN_DOUBLE_PRESS_MS)
+    {
+      audio_play_pause();   /* undo pause from first press */
+      audio_skip_track();
+      s_btn5_last_ms = 0;
+    }
+    else
+    {
+      audio_play_pause();
+      s_btn5_last_ms = now;
+    }
+  }
+  else if (GPIO_Pin == GPIO_PIN_6)
+  {
+    audio_vol_up();
+  }
+  else if (GPIO_Pin == GPIO_PIN_7)
+  {
+    audio_vol_down();
+  }
 }
 
 /* USER CODE END 4 */

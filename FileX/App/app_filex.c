@@ -182,10 +182,13 @@ UINT MX_FileX_Init(VOID *memory_ptr)
 
     tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
 
-    /* SD removal is now handled by GPIO interrupt (EXTI7) in main.c which
-       calls NVIC_SystemReset() instantly. Nothing to do here. */
+    /* Poll for SD removal — EXTI7 is mapped to PA7 (volume down), so PC7/SD_CD uses polling only. */
     for (;;)
-      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
+    {
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+        if (SD_CardIsPresent() == 0U)
+            NVIC_SystemReset();
+    }
   }
 
 /* USER CODE END fx_app_thread_entry 0*/

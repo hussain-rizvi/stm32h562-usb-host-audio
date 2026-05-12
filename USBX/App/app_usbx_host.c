@@ -141,34 +141,58 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
 
   MX_USBX_Host_Stack_Init();
 
+#ifdef AUDIO_OUTPUT_SAI
+  /* PA4 = SAI output (default), PA5 = USB-only output.
+     Mode persists across NVIC_SystemReset via TAMP backup register. */
+  HAL_PWR_EnableBkUpAccess();
+  int use_usb_output = (TAMP->BKP0R == 0x5A000002U);
+#endif
+
   while (1)
   {
     extern TX_EVENT_FLAGS_GROUP sd_event_flags;
     extern FX_MEDIA sdio_disk;
 
 #ifdef AUDIO_OUTPUT_SAI
-    /* SAI path: wait for SD (mandatory), then give USB speaker up to 3 s to
-       enumerate.  If no speaker is found within the timeout, audio_speaker
-       stays NULL and SAI-only mode activates automatically. */
-    ULONG sd_flags;
-    extern I2C_HandleTypeDef hi2c1;
-    tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
-    tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
-                       TX_AND, &sd_flags, 3 * TX_TIMER_TICKS_PER_SECOND);
-    tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
-    /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
-    tad5112_init(&hi2c1);
-    /* If a USB speaker is connected, run it on a dedicated thread using the
-       same proven path as USB-only mode — completely independent of SAI. */
-    if (audio_speaker != UX_NULL)
+    if (!use_usb_output)
     {
-        tx_thread_create(&s_usb_audio_thread, "usb_audio",
-                         usb_audio_thread_entry, 0,
-                         s_usb_audio_stack, USB_AUDIO_THREAD_STACK_SIZE,
-                         10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
+      /* SAI path: wait for SD (mandatory), then give USB speaker up to 3 s to
+         enumerate.  If no speaker is found within the timeout, audio_speaker
+         stays NULL and SAI-only mode activates automatically. */
+      ULONG sd_flags;
+      extern I2C_HandleTypeDef hi2c1;
+      tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
+      tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
+                         TX_AND, &sd_flags, 3 * TX_TIMER_TICKS_PER_SECOND);
+      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+      /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
+      tad5112_init(&hi2c1);
+      /* If a USB speaker is connected, run it on a dedicated thread using the
+         same proven path as USB-only mode — completely independent of SAI. */
+      if (audio_speaker != UX_NULL)
+      {
+          tx_thread_create(&s_usb_audio_thread, "usb_audio",
+                           usb_audio_thread_entry, 0,
+                           s_usb_audio_stack, USB_AUDIO_THREAD_STACK_SIZE,
+                           10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
+      }
+      /* SAI plays independently — no USB involvement */
+      audio_playback_sai_files(&sdio_disk, UX_NULL);
     }
-    /* SAI plays independently — no USB involvement */
-    audio_playback_sai_files(&sdio_disk, UX_NULL);
+    else
+    {
+      /* USB-only path: wait for both USB speaker and SD card */
+      ULONG actual_flags;
+      ULONG sd_flags;
+      tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
+                         TX_AND, &actual_flags, TX_WAIT_FOREVER);
+      tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
+      if (audio_speaker != UX_NULL)
+      {
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+        audio_playback_wav_files(audio_speaker, &sdio_disk);
+      }
+    }
 #else
     /* USB path: wait for both USB speaker and SD card */
     ULONG actual_flags;
