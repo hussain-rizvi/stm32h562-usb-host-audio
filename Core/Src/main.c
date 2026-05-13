@@ -508,6 +508,7 @@ uint8_t SD_CardIsPresent(void)
    PA6/PA7: volume up/down — plain inputs, polled every ~21 ms in audio loops.
    PC7: SD_CD card-detect — rising edge (card removed) → NVIC_SystemReset (EXTI7). */
 #define BTN_DEBOUNCE_MS      20U
+#define BTN_UI_DEBOUNCE_MS   200U
 #define BTN_DOUBLE_PRESS_MS  500U
 static volatile uint32_t s_btn4_last_ms = 0;
 static volatile uint32_t s_btn5_last_ms = 0;
@@ -517,7 +518,7 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   if (GPIO_Pin == GPIO_PIN_4)
   {
     uint32_t now = HAL_GetTick();
-    if (now - s_btn4_last_ms < BTN_DEBOUNCE_MS) return;
+    if (now - s_btn4_last_ms < BTN_UI_DEBOUNCE_MS) return;
     s_btn4_last_ms = now;
     __HAL_RCC_RTC_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
@@ -530,7 +531,7 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     /* elapsed = time since last confirmed press; treat unset (0) as > double-press window */
     uint32_t elapsed = (s_btn5_last_ms != 0U) ? (now - s_btn5_last_ms)
                                                : (BTN_DOUBLE_PRESS_MS + 1U);
-    if (elapsed < BTN_DEBOUNCE_MS) return;  /* bounce — ignore */
+    if (elapsed < BTN_UI_DEBOUNCE_MS) return;  /* bounce — ignore */
     if (elapsed < BTN_DOUBLE_PRESS_MS)
     {
       audio_play_pause();   /* undo pause from first press */

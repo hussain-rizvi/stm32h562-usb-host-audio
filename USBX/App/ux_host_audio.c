@@ -80,7 +80,7 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 static volatile UINT s_audio_playback_abort;
 
 static volatile UINT s_skip_track     = 0;  /* set by PA5 double-press */
-static volatile UINT s_playback_paused = 0;  /* set by PA5 single-press */
+static volatile UINT s_playback_paused = 1;  /* start paused; PA5 single-press toggles */
 
 /* USB speaker volume state — probe min/max/res once on first press, track internally */
 static volatile int8_t s_usb_vol_delta  = 0;
@@ -1119,13 +1119,22 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
     {
         if (s_skip_track) { s_skip_track = 0; goto done; }
 
-        to_read = (remaining > packet_size) ? packet_size : remaining;
-        status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
-        if (status != FX_SUCCESS || bytes_read == 0)
-            goto done;
+        if (s_playback_paused)
+        {
+            /* Fill with silence but don't consume file data — Phase 2 will read from start */
+            memset(audio_ring_buf[wr], 0, packet_size);
+        }
+        else
+        {
+            to_read = (remaining > packet_size) ? packet_size : remaining;
+            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            if (status != FX_SUCCESS || bytes_read == 0)
+                goto done;
 
-        if (bytes_read < packet_size)
-            memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+            if (bytes_read < packet_size)
+                memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+            remaining -= to_read;
+        }
 
         status = ring_submit(audio, wr, packet_size);
         if (status != UX_SUCCESS)
@@ -1133,7 +1142,6 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         wr = (wr + 1U) % AUDIO_RING_SLOTS;
         inflight++;
-        remaining -= to_read;
     }
 
     /* ---- Phase 2: steady state — one completion in, one new packet out ---- */
