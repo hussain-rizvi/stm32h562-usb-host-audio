@@ -1,0 +1,7 @@
+# Audio player config — copy this file to the root of the SD card
+# Keys are case-insensitive. Unknown keys are ignored.
+
+defaultOutput = USB
+defaultVol    = 6
+MaxVol        = 10
+MinVol        = 1

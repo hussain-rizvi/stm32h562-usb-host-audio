@@ -27,6 +27,7 @@
 #include "tad5112.h"
 #include "tx_api.h"
 #include "fx_api.h"
+#include "audio_config.h"
 /* minimp3 inner decode loops (MDCT/QMF) must run fast regardless of project
    build config.  -O0 (Debug) makes one frame take ~80 ms on Cortex-M33 —
    far longer than the 26 ms frame duration — causing guaranteed underrun.
@@ -89,7 +90,6 @@ static int32_t         s_usb_vol_cur    = 0;
 static int32_t         s_usb_vol_min    = 0;
 static int32_t         s_usb_vol_max    = 0;
 static int32_t         s_usb_vol_step   = 256 * 3;  /* 3 dB default, updated from res */
-static ULONG           s_usb_vol_entity = 0;
 
 /* Hold-to-repeat volume: fires once on first press, then repeats every VOL_REPEAT_MS
    after VOL_HOLD_DELAY_MS of continuous hold. Shared across all streaming contexts. */
@@ -142,39 +142,37 @@ static UINT audio_wait_xfer_done(VOID)
  * requests from RAM.  A single 4 KB SD read covers ~23 USB frames at
  * 44.1 kHz stereo 16-bit (176 bytes/frame), so FileX overhead is paid
  * once every ~23 ms instead of once per 1 ms USB frame.
+ * DrainCtx is shared by USB and SAI paths (each has its own buffer+state).
  */
 #define AUDIO_SD_CHUNK_SIZE  4096U
+typedef struct { UCHAR *buf; ULONG pos; ULONG avail; } DrainCtx;
+
 static UCHAR s_sd_chunk_buf[AUDIO_SD_CHUNK_SIZE] __attribute__((aligned(4)));
-static ULONG s_sd_chunk_pos;
-static ULONG s_sd_chunk_avail;
+static DrainCtx s_usb_drain = { s_sd_chunk_buf, 0, 0 };
 
-static VOID drain_reset(VOID)
-{
-    s_sd_chunk_pos   = 0;
-    s_sd_chunk_avail = 0;
-}
+static VOID drain_ctx_reset(DrainCtx *d) { d->pos = 0; d->avail = 0; }
 
-static UINT drain_read(FX_FILE *f, UCHAR *dst, ULONG want, ULONG *got_out)
+static UINT drain_ctx_read(DrainCtx *d, FX_FILE *f, UCHAR *dst, ULONG want, ULONG *got_out)
 {
     ULONG got = 0;
     while (got < want)
     {
-        if (s_sd_chunk_avail == 0)
+        if (d->avail == 0)
         {
             ULONG nr;
-            UINT st = fx_file_read(f, s_sd_chunk_buf, AUDIO_SD_CHUNK_SIZE, &nr);
+            UINT st = fx_file_read(f, d->buf, AUDIO_SD_CHUNK_SIZE, &nr);
             if (st != FX_SUCCESS || nr == 0)
                 break;
-            s_sd_chunk_pos   = 0;
-            s_sd_chunk_avail = nr;
+            d->pos   = 0;
+            d->avail = nr;
         }
         ULONG take = want - got;
-        if (take > s_sd_chunk_avail)
-            take = s_sd_chunk_avail;
-        memcpy(dst + got, s_sd_chunk_buf + s_sd_chunk_pos, take);
-        s_sd_chunk_pos   += take;
-        s_sd_chunk_avail -= take;
-        got              += take;
+        if (take > d->avail)
+            take = d->avail;
+        memcpy(dst + got, d->buf + d->pos, take);
+        d->pos   += take;
+        d->avail -= take;
+        got      += take;
     }
     *got_out = got;
     return (got > 0) ? FX_SUCCESS : FX_IO_ERROR;
@@ -251,40 +249,7 @@ static volatile UINT  sai_fill_upper;  /* 0 = lower half free, 1 = upper half fr
 /* SAI-specific SD drain buffer — completely separate from the USB drain buffer
    so both threads can stream SD concurrently without corrupting each other. */
 static UCHAR s_sai_sd_chunk_buf[AUDIO_SD_CHUNK_SIZE] __attribute__((aligned(4)));
-static ULONG s_sai_sd_chunk_pos;
-static ULONG s_sai_sd_chunk_avail;
-
-static VOID sai_drain_reset(VOID)
-{
-    s_sai_sd_chunk_pos   = 0;
-    s_sai_sd_chunk_avail = 0;
-}
-
-static UINT sai_drain_read(FX_FILE *f, UCHAR *dst, ULONG want, ULONG *got_out)
-{
-    ULONG got = 0;
-    while (got < want)
-    {
-        if (s_sai_sd_chunk_avail == 0)
-        {
-            ULONG nr;
-            UINT st = fx_file_read(f, s_sai_sd_chunk_buf, AUDIO_SD_CHUNK_SIZE, &nr);
-            if (st != FX_SUCCESS || nr == 0)
-                break;
-            s_sai_sd_chunk_pos   = 0;
-            s_sai_sd_chunk_avail = nr;
-        }
-        ULONG take = want - got;
-        if (take > s_sai_sd_chunk_avail)
-            take = s_sai_sd_chunk_avail;
-        memcpy(dst + got, s_sai_sd_chunk_buf + s_sai_sd_chunk_pos, take);
-        s_sai_sd_chunk_pos   += take;
-        s_sai_sd_chunk_avail -= take;
-        got                  += take;
-    }
-    *got_out = got;
-    return (got > 0) ? FX_SUCCESS : FX_IO_ERROR;
-}
+static DrainCtx s_sai_drain = { s_sai_sd_chunk_buf, 0, 0 };
 
 /* SAI-specific MP3 state — separate from USB path so both can decode independently */
 static mp3dec_t      s_sai_mp3_decoder;
@@ -466,7 +431,7 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
             {
                 ULONG to_read = MP3_READ_BUF_SIZE - *mp3_size;
                 ULONG nr = 0;
-                sai_drain_read(file, s_sai_mp3_read_buf + *mp3_size, to_read, &nr);
+                drain_ctx_read(&s_sai_drain, file, s_sai_mp3_read_buf + *mp3_size, to_read, &nr);
                 *mp3_size += nr;
                 if (nr < to_read) *mp3_eof = 1;
             }
@@ -545,7 +510,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     if (sai_reconfigure(info->sample_rate) != HAL_OK)
         return UX_ERROR;
 
-    sai_drain_reset();
+    drain_ctx_reset(&s_sai_drain);
     sai_sem_flush();
 
     /* Mute the amp for exactly 5 ms around SAI start.  The amp is kept powered
@@ -606,7 +571,7 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         if (remaining > 0U)
         {
             to_read = (remaining > half_pcm_bytes) ? half_pcm_bytes : remaining;
-            sai_drain_read(file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
+            drain_ctx_read(&s_sai_drain, file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
             if (bytes_read < half_pcm_bytes)
                 memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
             pcm16_to_pcm32(half, s_sai_pcm16_tmp, half_cnt);
@@ -645,7 +610,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     UINT  probe_ch     = 2U;
 
     mp3dec_init(&s_sai_mp3_decoder);
-    sai_drain_reset();
+    drain_ctx_reset(&s_sai_drain);
     sai_sem_flush();
 
     /* Pre-probe the MP3 sample rate so sai_reconfigure() runs BEFORE DMA starts.
@@ -654,7 +619,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
      * causes the 2-second semaphore wait to time out on every WAV<->MP3 switch. */
     {
         ULONG nr = 0;
-        sai_drain_read(file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
+        drain_ctx_read(&s_sai_drain, file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
         ULONG probe_size = nr;
 
         while (probe_size > 0)
@@ -683,7 +648,7 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         /* Reset file and decoder so the streaming pass starts from the beginning. */
         fx_file_seek(file, 0);
         mp3dec_init(&s_sai_mp3_decoder);
-        sai_drain_reset();
+        drain_ctx_reset(&s_sai_drain);
         mp3_size = 0;
         mp3_eof  = 0;
         pcm_smp  = 0;
@@ -1067,8 +1032,9 @@ static VOID usb_vol_apply(UX_HOST_CLASS_AUDIO *audio)
             s_usb_vol_max = 0;            /* 0 dB */
         }
 
-        s_usb_vol_entity = audio->ux_host_class_audio_feature_unit_id;
-        s_usb_vol_init   = 1;
+        s_usb_vol_init = 1;
+        /* Set starting volume from config default rather than device GET_CUR */
+        s_usb_vol_cur = config_vol_to_usb(s_usb_vol_min, s_usb_vol_max, s_usb_vol_step);
     }
 
     s_usb_vol_cur += (int32_t)d * s_usb_vol_step;
@@ -1110,7 +1076,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
     if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
         return UX_ERROR;  /* unsupported format — skip file */
 
-    drain_reset();
+    drain_ctx_reset(&s_usb_drain);
     ring_sem_flush();
     remaining = info->data_size;
 
@@ -1127,7 +1093,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
         else
         {
             to_read = (remaining > packet_size) ? packet_size : remaining;
-            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            status  = drain_ctx_read(&s_usb_drain, file, audio_ring_buf[wr], to_read, &bytes_read);
             if (status != FX_SUCCESS || bytes_read == 0)
                 goto done;
 
@@ -1165,7 +1131,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
         else
         {
             to_read = (remaining > packet_size) ? packet_size : remaining;
-            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            status  = drain_ctx_read(&s_usb_drain, file, audio_ring_buf[wr], to_read, &bytes_read);
             if (status != FX_SUCCESS || bytes_read == 0)
                 goto done;
 
@@ -1187,30 +1153,18 @@ done:
     return (status == UX_SUCCESS || status == FX_SUCCESS) ? UX_SUCCESS : status;
 }
 
-static UINT str_ends_with_wav(CHAR *name)
+/* Case-insensitive 3-char extension match: pass lowercase letters (digits are self-stable under |0x20). */
+static UINT str_ends_with_ext(CHAR *name, CHAR a, CHAR b, CHAR c)
 {
     UINT len = 0;
     while (name[len] != '\0')
         len++;
     if (len < 4)
         return 0;
-    return ((name[len-4] == '.') &&
-            (name[len-3] == 'w' || name[len-3] == 'W') &&
-            (name[len-2] == 'a' || name[len-2] == 'A') &&
-            (name[len-1] == 'v' || name[len-1] == 'V'));
-}
-
-static UINT str_ends_with_mp3(CHAR *name)
-{
-    UINT len = 0;
-    while (name[len] != '\0')
-        len++;
-    if (len < 4)
-        return 0;
-    return ((name[len-4] == '.') &&
-            (name[len-3] == 'm' || name[len-3] == 'M') &&
-            (name[len-2] == 'p' || name[len-2] == 'P') &&
-            (name[len-1] == '3'));
+    return (name[len-4] == '.' &&
+            (name[len-3] | 0x20) == a &&
+            (name[len-2] | 0x20) == b &&
+            (name[len-1] | 0x20) == c);
 }
 
 static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
@@ -1227,7 +1181,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
     ULONG slot_fill   = 0;  /* bytes filled in audio_ring_buf[wr] so far */
 
     mp3dec_init(&s_mp3_decoder);
-    drain_reset();
+    drain_ctx_reset(&s_usb_drain);
     ring_sem_flush();
 
     UINT mp3_eof = 0;
@@ -1268,7 +1222,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
         {
             ULONG to_read = MP3_READ_BUF_SIZE - mp3_size;
             ULONG nr = 0;
-            drain_read(file, s_mp3_read_buf + mp3_size, to_read, &nr);
+            drain_ctx_read(&s_usb_drain, file, s_mp3_read_buf + mp3_size, to_read, &nr);
             mp3_size += nr;
             if (nr < to_read)
                 mp3_eof = 1;  /* short read → EOF, drain remaining buffer */
@@ -1391,6 +1345,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
 
     while (1)
     {
+        UINT files_played = 0;
         status = fx_directory_first_entry_find(media, entry_name);
 
         /* If the directory scan itself fails (SD removed, media error) exit
@@ -1406,8 +1361,9 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
                                          &file_size, UX_NULL, UX_NULL,
                                          UX_NULL, UX_NULL, UX_NULL, UX_NULL);
 
-            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
+            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'w', 'a', 'v'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 /* File found in directory but cannot open = SD removed or IO error.
                    Must goto done — silently skipping would loop forever on cached
@@ -1419,21 +1375,30 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
                 if (status == FX_SUCCESS)
                     status = audio_stream_wav(audio, &audio_file, &wav_info);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS)
                     goto done;
             }
-            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
+            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'm', 'p', '3'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 if (status != FX_SUCCESS)
                     goto done;
                 status = audio_stream_mp3(audio, &audio_file);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS)
                     goto done;
             }
 
             status = fx_directory_next_entry_find(media, entry_name);
+        }
+
+        if (files_played == 0)
+        {
+            led_set_state(LED_BLINK_NO_AUDIO);
+            tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);  /* wait before retrying scan */
         }
     }
 
@@ -1476,6 +1441,7 @@ VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
 
     while (1)
     {
+        UINT files_played = 0;
         if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
         status = fx_directory_first_entry_find(media, entry_name);
         if (status != FX_SUCCESS && status != FX_NO_MORE_ENTRIES)
@@ -1487,27 +1453,37 @@ VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
                                          &file_size, UX_NULL, UX_NULL,
                                          UX_NULL, UX_NULL, UX_NULL, UX_NULL);
 
-            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
+            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'w', 'a', 'v'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 if (status != FX_SUCCESS) goto sai_done;
                 status = wav_parse_header(&audio_file, &wav_info);
                 if (status == FX_SUCCESS)
                     status = audio_stream_wav_sai(&audio_file, &wav_info);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS) goto sai_done;
             }
-            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
+            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'm', 'p', '3'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 if (status != FX_SUCCESS)
-                	goto sai_done;
+                    goto sai_done;
                 status = audio_stream_mp3_sai(&audio_file);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS) goto sai_done;
             }
 
             status = fx_directory_next_entry_find(media, entry_name);
+        }
+
+        if (files_played == 0)
+        {
+            led_set_state(LED_BLINK_NO_AUDIO);
+            tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
         }
     }
 

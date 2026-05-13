@@ -13,5 +13,7 @@ void tad5112_vol_up(void);
 void tad5112_vol_down(void);
 /* Call from thread context (does the I2C write). */
 void tad5112_vol_apply(void);
+/* Set volume register directly (thread context). val clamped to [TAD_VOL_MIN, TAD_VOL_MAX]. */
+void tad5112_set_vol(uint8_t val);
 
 #endif /* TAD5112_H */

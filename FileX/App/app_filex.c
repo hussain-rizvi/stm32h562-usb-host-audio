@@ -25,7 +25,8 @@
 /* USER CODE BEGIN Includes */
 #include "tx_api.h"
 #include "main.h"
-UINT audio_playback_is_active(VOID);
+#include "ux_host_audio.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,6 +118,7 @@ UINT MX_FileX_Init(VOID *memory_ptr)
   {
     return TX_GROUP_ERROR;
   }
+  config_led_init();
 /* USER CODE END MX_FileX_Init */
 
 /* Initialize FileX.  */
@@ -142,10 +144,13 @@ UINT MX_FileX_Init(VOID *memory_ptr)
 /* USER CODE BEGIN fx_app_thread_entry 0*/
   TX_PARAMETER_NOT_USED(thread_input);
 
+  config_load_defaults();
+
   /* SD_EN is on before MX_SDMMC1_SD_Init; wait for CD then mount. Remount on re-insert; unmount on removal
    * only when USB audio is not reading from the card. */
   for (;;)
   {
+    led_set_state(LED_BLINK_NO_CARD);
     while (SD_CardIsPresent() == 0U)
     {
       tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
@@ -180,9 +185,14 @@ UINT MX_FileX_Init(VOID *memory_ptr)
       continue;
     }
 
+    /* Read config.txt from SD root, set TAMP default output if first boot */
+    config_read_from_sd(&sdio_disk);
+    config_apply_default_output();
+    led_set_state(LED_OFF);  /* audio thread sets LED_ON per file, LED_BLINK_NO_AUDIO if none found */
+
     tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
 
-    /* Poll for SD removal — EXTI7 is mapped to PA7 (volume down), so PC7/SD_CD uses polling only. */
+    /* EXTI7 on PC7/SD_CD already triggers NVIC_SystemReset on card removal; poll here as a backup. */
     for (;;)
     {
         tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);

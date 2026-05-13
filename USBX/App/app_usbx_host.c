@@ -27,6 +27,7 @@
 #include "ux_host_audio.h"
 #include "app_filex.h"
 #include "tad5112.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -125,11 +126,26 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
   /* USER CODE BEGIN app_ux_host_thread_entry */
   TX_PARAMETER_NOT_USED(thread_input);
 
+  /* Read reset source before clearing — SFTRST means NVIC_SystemReset (SD removal, etc.). */
+  const int is_soft_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != 0U);
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
   MX_USBX_Host_Stack_Init();
 
+  /* Show firmware version only on cold boot, skip on software reset. */
+  if (!is_soft_reset)
+  {
+    led_version_blink();
+  }
+  led_timer_start();
+
 #ifdef AUDIO_OUTPUT_SAI
-  /* PA4 = SAI output (default), PA5 = USB-only output.
-     Mode persists across NVIC_SystemReset via TAMP backup register. */
+  /* Wait for FileX thread to mount SD and write config.txt output mode to TAMP. */
+  {
+    ULONG _flags;
+    tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &_flags, TX_WAIT_FOREVER);
+  }
+  /* Output mode is set by config.txt defaultOutput via TAMP backup register. */
   HAL_PWR_EnableBkUpAccess();
   int use_usb_output = (TAMP->BKP0R == 0x5A000002U);
 #endif
@@ -153,6 +169,7 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
       /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
       tad5112_init(&hi2c1);
+      tad5112_set_vol(config_vol_to_tad());
       /* SAI-only mode — no USB thread. PA4 toggle selects SAI or USB, not both. */
       audio_playback_sai_files(&sdio_disk, UX_NULL);
     }

@@ -57,6 +57,8 @@ uint8_t SD_CardIsPresent(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define STATUS_LED_Pin GPIO_PIN_5
+#define STATUS_LED_GPIO_Port GPIOB
 #define MUTE_Pin GPIO_PIN_10
 #define MUTE_GPIO_Port GPIOB
 #define SD_EN_Pin GPIO_PIN_14

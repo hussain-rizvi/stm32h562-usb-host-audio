@@ -443,6 +443,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, MUTE_Pin|SD_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PA4 PA5 PA6 */
   GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
@@ -450,8 +451,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : MUTE_Pin SD_EN_Pin */
-  GPIO_InitStruct.Pin = MUTE_Pin|SD_EN_Pin;
+  /*Configure GPIO pins : STATUS_LED_Pin MUTE_Pin SD_EN_Pin */
+  GPIO_InitStruct.Pin = STATUS_LED_Pin|MUTE_Pin|SD_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -496,20 +497,16 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-uint8_t sd_cd;
 uint8_t SD_CardIsPresent(void)
 {
-	sd_cd = HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin);
   return (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == SD_CD_INSERTED_LEVEL) ? 1U : 0U;
 }
 
-/* PA4: toggle SAI/USB output mode (persists via TAMP backup register, resets device).
-   PA5: single press = play/pause; double press within 500 ms = next track.
-   PA6/PA7: volume up/down — plain inputs, polled every ~21 ms in audio loops.
-   PC7: SD_CD card-detect — rising edge (card removed) → NVIC_SystemReset (EXTI7). */
-#define BTN_DEBOUNCE_MS      20U
-#define BTN_UI_DEBOUNCE_MS   200U
-#define BTN_DOUBLE_PRESS_MS  500U
+/* PA4: play/pause.  PA5: next track.
+   PA6/PA7: volume down/up — plain inputs, polled every ~21 ms in audio loops.
+   PC7: SD_CD card-detect — rising edge (card removed) → NVIC_SystemReset (EXTI7).
+   Output mode (SAI/USB) is read from config.txt on the SD card. */
+#define BTN_UI_DEBOUNCE_MS  200U
 static volatile uint32_t s_btn4_last_ms = 0;
 static volatile uint32_t s_btn5_last_ms = 0;
 
@@ -520,29 +517,14 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     uint32_t now = HAL_GetTick();
     if (now - s_btn4_last_ms < BTN_UI_DEBOUNCE_MS) return;
     s_btn4_last_ms = now;
-    __HAL_RCC_RTC_CLK_ENABLE();
-    HAL_PWR_EnableBkUpAccess();
-    TAMP->BKP0R = (TAMP->BKP0R == 0x5A000002U) ? 0x5A000001U : 0x5A000002U;
-    NVIC_SystemReset();
+    audio_play_pause();
   }
   else if (GPIO_Pin == GPIO_PIN_5)
   {
     uint32_t now = HAL_GetTick();
-    /* elapsed = time since last confirmed press; treat unset (0) as > double-press window */
-    uint32_t elapsed = (s_btn5_last_ms != 0U) ? (now - s_btn5_last_ms)
-                                               : (BTN_DOUBLE_PRESS_MS + 1U);
-    if (elapsed < BTN_UI_DEBOUNCE_MS) return;  /* bounce — ignore */
-    if (elapsed < BTN_DOUBLE_PRESS_MS)
-    {
-      audio_play_pause();   /* undo pause from first press */
-      audio_skip_track();
-      s_btn5_last_ms = 0;
-    }
-    else
-    {
-      audio_play_pause();
-      s_btn5_last_ms = now;
-    }
+    if (now - s_btn5_last_ms < BTN_UI_DEBOUNCE_MS) return;
+    s_btn5_last_ms = now;
+    audio_skip_track();
   }
   else if (GPIO_Pin == GPIO_PIN_7)
   {

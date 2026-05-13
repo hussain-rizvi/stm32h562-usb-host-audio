@@ -84,6 +84,14 @@ void tad5112_vol_apply(void)
     vol_write(s_vol);
 }
 
+void tad5112_set_vol(uint8_t val)
+{
+    if (val < TAD5112_VOL_MIN) val = TAD5112_VOL_MIN;
+    if (val > TAD5112_VOL_MAX) val = TAD5112_VOL_MAX;
+    s_vol = val;
+    vol_write(s_vol);
+}
+
 void tad5112_sleep(void)
 {
     uint8_t val = 0x00U;

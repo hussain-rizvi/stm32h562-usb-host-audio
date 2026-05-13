@@ -10,6 +10,7 @@
 /**************************************************************************/
 
 #include "fx_stm32_sd_driver.h"
+#include "main.h"
 
 TX_SEMAPHORE sd_tx_semaphore;
 TX_SEMAPHORE sd_rx_semaphore;
@@ -88,7 +89,6 @@ INT fx_stm32_sd_get_status(UINT instance)
   /* check_sd_status() calls this in a tight spin loop (no tx_thread_sleep).
      Detect physical removal via GPIO here so the spin exits in < 1 ms instead
      of holding the CPU for 10 s and starving the app_filex polling thread. */
-  extern uint8_t SD_CardIsPresent(void);
   if (SD_CardIsPresent() == 0U)
       NVIC_SystemReset();
   /* USER CODE END PRE_GET_STATUS */
