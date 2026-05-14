@@ -89,27 +89,82 @@ static UINT            s_usb_vol_init   = 0;
 static int32_t         s_usb_vol_cur    = 0;
 static int32_t         s_usb_vol_min    = 0;
 static int32_t         s_usb_vol_max    = 0;
-static int32_t         s_usb_vol_step   = 256 * 3;  /* 3 dB default, updated from res */
+static int32_t         s_usb_vol_step   = 256;      /* 1 dB default, updated from GET_RES */
 
 /* Hold-to-repeat volume: fires once on first press, then repeats every VOL_REPEAT_MS
-   after VOL_HOLD_DELAY_MS of continuous hold. Shared across all streaming contexts. */
-#define VOL_HOLD_DELAY_MS  400U
-#define VOL_REPEAT_MS       80U
+   after VOL_HOLD_DELAY_MS of continuous hold. Shared across SAI and USB contexts. */
+#define VOL_HOLD_DELAY_MS    400U
+#define VOL_REPEAT_MS         80U
+#define VOL_LED_DEBOUNCE_MS   50U  /* button must be held this long before LED blinks */
 static uint32_t s_vol_pa6_press_ms = 0, s_vol_pa6_last_ms = 0;
 static uint32_t s_vol_pa7_press_ms = 0, s_vol_pa7_last_ms = 0;
+/* Armed = pin confirmed LOW (button open) at least once since last unpause.
+   Prevents a false press if the pin is already HIGH when playback starts. */
+static uint8_t s_vol_pa6_armed = 0;
+static uint8_t s_vol_pa7_armed = 0;
 
-#define POLL_VOL_BUTTONS() do { \
-    uint32_t _t = HAL_GetTick(); \
-    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6) == GPIO_PIN_SET) { \
-        if (!s_vol_pa6_press_ms) { audio_vol_down(); s_vol_pa6_press_ms = _t ? _t : 1U; s_vol_pa6_last_ms = _t; } \
-        else if ((_t - s_vol_pa6_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa6_last_ms) >= VOL_REPEAT_MS) \
-            { audio_vol_down(); s_vol_pa6_last_ms = _t; } \
-    } else { s_vol_pa6_press_ms = 0; } \
-    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7) == GPIO_PIN_SET) { \
-        if (!s_vol_pa7_press_ms) { audio_vol_up(); s_vol_pa7_press_ms = _t ? _t : 1U; s_vol_pa7_last_ms = _t; } \
-        else if ((_t - s_vol_pa7_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa7_last_ms) >= VOL_REPEAT_MS) \
-            { audio_vol_up(); s_vol_pa7_last_ms = _t; } \
-    } else { s_vol_pa7_press_ms = 0; } \
+/* PA6 = physical vol-UP button, PA7 = physical vol-DOWN button, both active-LOW
+   (external pull-up keeps pins HIGH at rest; button press pulls to GND). */
+#define POLL_VOL_BUTTONS_SAI() do { \
+    if (!s_playback_paused) { \
+        uint32_t _t = HAL_GetTick(); \
+        int _up = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6) == GPIO_PIN_RESET); \
+        int _dn = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7) == GPIO_PIN_RESET); \
+        if (!_up) { s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 1; } \
+        else if (s_vol_pa6_armed) { \
+            if (!s_vol_pa6_press_ms) { tad5112_vol_up(); \
+                s_vol_pa6_press_ms = _t ? _t : 1U; s_vol_pa6_last_ms = _t; } \
+            else if ((_t - s_vol_pa6_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa6_last_ms) >= VOL_REPEAT_MS) \
+                { tad5112_vol_up(); s_vol_pa6_last_ms = _t; } \
+        } \
+        if (!_dn) { s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 1; } \
+        else if (s_vol_pa7_armed) { \
+            if (!s_vol_pa7_press_ms) { tad5112_vol_down(); \
+                s_vol_pa7_press_ms = _t ? _t : 1U; s_vol_pa7_last_ms = _t; } \
+            else if ((_t - s_vol_pa7_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa7_last_ms) >= VOL_REPEAT_MS) \
+                { tad5112_vol_down(); s_vol_pa7_last_ms = _t; } \
+        } \
+        vol_led_update(s_vol_pa7_press_ms != 0U && (_t - s_vol_pa7_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       tad5112_at_min(), \
+                       s_vol_pa6_press_ms != 0U && (_t - s_vol_pa6_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       tad5112_at_max()); \
+        vol_led_set_playing(1); \
+    } else { \
+        s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 0; \
+        s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 0; \
+        vol_led_set_playing(0); \
+    } \
+} while(0)
+
+#define POLL_VOL_BUTTONS_USB() do { \
+    if (!s_playback_paused) { \
+        uint32_t _t = HAL_GetTick(); \
+        int _up = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6) == GPIO_PIN_RESET); \
+        int _dn = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7) == GPIO_PIN_RESET); \
+        if (!_up) { s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 1; } \
+        else if (s_vol_pa6_armed) { \
+            if (!s_vol_pa6_press_ms) { s_usb_vol_delta++; \
+                s_vol_pa6_press_ms = _t ? _t : 1U; s_vol_pa6_last_ms = _t; } \
+            else if ((_t - s_vol_pa6_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa6_last_ms) >= VOL_REPEAT_MS) \
+                { s_usb_vol_delta++; s_vol_pa6_last_ms = _t; } \
+        } \
+        if (!_dn) { s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 1; } \
+        else if (s_vol_pa7_armed) { \
+            if (!s_vol_pa7_press_ms) { s_usb_vol_delta--; \
+                s_vol_pa7_press_ms = _t ? _t : 1U; s_vol_pa7_last_ms = _t; } \
+            else if ((_t - s_vol_pa7_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa7_last_ms) >= VOL_REPEAT_MS) \
+                { s_usb_vol_delta--; s_vol_pa7_last_ms = _t; } \
+        } \
+        vol_led_update(s_vol_pa7_press_ms != 0U && (_t - s_vol_pa7_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       s_usb_vol_init && (s_usb_vol_cur <= s_usb_vol_min), \
+                       s_vol_pa6_press_ms != 0U && (_t - s_vol_pa6_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       s_usb_vol_init && (s_usb_vol_cur >= s_usb_vol_max)); \
+        vol_led_set_playing(1); \
+    } else { \
+        s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 0; \
+        s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 0; \
+        vol_led_set_playing(0); \
+    } \
 } while(0)
 
 /* Separate active flags so SAI and USB threads can run concurrently without
@@ -193,17 +248,6 @@ VOID audio_play_pause(VOID)
     s_playback_paused = !s_playback_paused;
 }
 
-VOID audio_vol_up(VOID)
-{
-    tad5112_vol_up();
-    s_usb_vol_delta++;
-}
-
-VOID audio_vol_down(VOID)
-{
-    tad5112_vol_down();
-    s_usb_vol_delta--;
-}
 
 UINT audio_playback_is_active(VOID)
 {
@@ -224,7 +268,6 @@ static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 /* ===================================================================
  * SAI analogue output path  (32-bit I2S → TAD5112 CODEC)
  * =================================================================== */
-#ifdef AUDIO_OUTPUT_SAI
 
 extern SAI_HandleTypeDef hsai_BlockA1;
 extern DMA_HandleTypeDef hdma_sai1_a;
@@ -552,9 +595,9 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
 
-        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
+        if (SD_CardIsPresent() == 0U) system_soft_reset();
 
-        POLL_VOL_BUTTONS();
+        POLL_VOL_BUTTONS_SAI();
 
         if (s_skip_track) { s_skip_track = 0; break; }
 
@@ -676,9 +719,9 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         if (tx_semaphore_get(&sai_sem, TX_TIMER_TICKS_PER_SECOND * 2) != TX_SUCCESS)
         { status = UX_ERROR; break; }
 
-        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
+        if (SD_CardIsPresent() == 0U) system_soft_reset();
 
-        POLL_VOL_BUTTONS();
+        POLL_VOL_BUTTONS_SAI();
 
         if (s_skip_track) { s_skip_track = 0; break; }
 
@@ -711,8 +754,6 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     sai_sem_flush();
     return status;
 }
-
-#endif /* AUDIO_OUTPUT_SAI */
 
 static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
 {
@@ -825,7 +866,6 @@ static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
 static UCHAR audio_ring_buf[AUDIO_RING_SLOTS][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
 static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_ring_xfer[AUDIO_RING_SLOTS];
 
-#ifdef AUDIO_OUTPUT_SAI
 /* USB completion callback — signals the feeder thread; never blocks. */
 static VOID usb_feeder_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
@@ -961,7 +1001,6 @@ static VOID sai_usb_configure(ULONG sample_rate, UINT channels)
     s_usb_sample_rate  = sample_rate;
     s_usb_channels_num = channels;
 }
-#endif /* AUDIO_OUTPUT_SAI */
 
 /* Drain any stale semaphore counts left by an aborted stream. */
 static VOID ring_sem_flush(VOID)
@@ -1121,7 +1160,7 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
         if (s_skip_track) { s_skip_track = 0; goto done; }
 
-        POLL_VOL_BUTTONS();
+        POLL_VOL_BUTTONS_USB();
         usb_vol_apply(audio);
 
         if (s_playback_paused)
@@ -1190,7 +1229,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
     {
         if (s_skip_track) { s_skip_track = 0; break; }
 
-        POLL_VOL_BUTTONS();
+        POLL_VOL_BUTTONS_USB();
         usb_vol_apply(audio);
 
         if (s_playback_paused)
@@ -1397,6 +1436,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
 
         if (files_played == 0)
         {
+            vol_led_set_playing(0);
             led_set_state(LED_BLINK_NO_AUDIO);
             tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);  /* wait before retrying scan */
         }
@@ -1415,7 +1455,6 @@ done:
     tx_semaphore_delete(&audio_xfer_semaphore);
 }
 
-#ifdef AUDIO_OUTPUT_SAI
 VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
 {
     UINT  status;
@@ -1442,7 +1481,7 @@ VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
     while (1)
     {
         UINT files_played = 0;
-        if (SD_CardIsPresent() == 0U) NVIC_SystemReset();
+        if (SD_CardIsPresent() == 0U) system_soft_reset();
         status = fx_directory_first_entry_find(media, entry_name);
         if (status != FX_SUCCESS && status != FX_NO_MORE_ENTRIES)
             goto sai_done;
@@ -1482,6 +1521,7 @@ VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio)
 
         if (files_played == 0)
         {
+            vol_led_set_playing(0);
             led_set_state(LED_BLINK_NO_AUDIO);
             tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
         }
@@ -1497,6 +1537,5 @@ sai_done:
     s_audio_playback_active = TX_FALSE;
     tx_semaphore_delete(&sai_sem);
 }
-#endif /* AUDIO_OUTPUT_SAI */
 
 /* USER CODE END 1 */

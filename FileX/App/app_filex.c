@@ -150,11 +150,20 @@ UINT MX_FileX_Init(VOID *memory_ptr)
    * only when USB audio is not reading from the card. */
   for (;;)
   {
-    led_set_state(LED_BLINK_NO_CARD);
-    while (SD_CardIsPresent() == 0U)
+    int card_just_inserted = 0;
+    if (SD_CardIsPresent() == 0U)
     {
-      tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+      led_set_state(LED_BLINK_NO_CARD);
+      while (SD_CardIsPresent() == 0U)
+      {
+        tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+      }
+      card_just_inserted = 1;
     }
+    /* Spring-loaded reader bounces on physical insertion — only wait when
+       the card was just inserted, not on reboot with card already present. */
+    if (card_just_inserted)
+      tx_thread_sleep(2U * TX_TIMER_TICKS_PER_SECOND);
 
     for (;;)
     {
@@ -185,9 +194,7 @@ UINT MX_FileX_Init(VOID *memory_ptr)
       continue;
     }
 
-    /* Read config.txt from SD root, set TAMP default output if first boot */
     config_read_from_sd(&sdio_disk);
-    config_apply_default_output();
     led_set_state(LED_OFF);  /* audio thread sets LED_ON per file, LED_BLINK_NO_AUDIO if none found */
 
     tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
@@ -197,7 +204,7 @@ UINT MX_FileX_Init(VOID *memory_ptr)
     {
         tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
         if (SD_CardIsPresent() == 0U)
-            NVIC_SystemReset();
+            system_soft_reset();
     }
   }
 

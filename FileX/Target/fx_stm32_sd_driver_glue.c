@@ -88,9 +88,15 @@ INT fx_stm32_sd_get_status(UINT instance)
   UNUSED(instance);
   /* check_sd_status() calls this in a tight spin loop (no tx_thread_sleep).
      Detect physical removal via GPIO here so the spin exits in < 1 ms instead
-     of holding the CPU for 10 s and starving the app_filex polling thread. */
+     of holding the CPU for 10 s and starving the app_filex polling thread.
+     Only reset during active playback; during initial mount let FileX see the
+     error and retry so the version-blink sequence is not interrupted. */
   if (SD_CardIsPresent() == 0U)
-      NVIC_SystemReset();
+  {
+      extern UINT audio_playback_is_active(void);
+      if (audio_playback_is_active())
+          system_soft_reset();
+  }
   /* USER CODE END PRE_GET_STATUS */
 
   if(HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
@@ -202,9 +208,12 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
 void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
 {
     (void)hsd;
-    /* Any SDMMC error (card removal, DMA abort) is unrecoverable during audio playback.
-       Reset immediately so app_filex can remount on card re-insertion, instead of
-       waiting up to 10 s for the DMA semaphore to time out per blocked read call. */
-    NVIC_SystemReset();
+    /* Any SDMMC error during active playback is unrecoverable — reset so FileX
+       can remount on card re-insertion rather than timing out for 10 s.
+       During initial mount (no active playback) let FileX see the error and
+       retry; resetting here would interrupt the version-blink sequence. */
+    extern UINT audio_playback_is_active(void);
+    if (audio_playback_is_active())
+        NVIC_SystemReset();
 }
 /* USER CODE END 1 */

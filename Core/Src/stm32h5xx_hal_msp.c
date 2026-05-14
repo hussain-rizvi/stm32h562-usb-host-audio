@@ -40,11 +40,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-#ifdef AUDIO_OUTPUT_SAI
 DMA_HandleTypeDef         hdma_sai1_a;
 static DMA_NodeTypeDef    sai_dma_node  __attribute__((aligned(32)));
 static DMA_QListTypeDef   sai_dma_queue;
-#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -412,7 +410,6 @@ void HAL_SAI_MspDeInit(SAI_HandleTypeDef* hsai)
 }
 
 /* USER CODE BEGIN 1 */
-#ifdef AUDIO_OUTPUT_SAI
 void sai_dma_msp_setup(SAI_HandleTypeDef *hsai)
 {
     /* GPIO speed: re-init at HIGH for ~3 MHz SAI SCK (CubeMX generates LOW) */
@@ -469,5 +466,4 @@ void sai_dma_msp_setup(SAI_HandleTypeDef *hsai)
        cannot preempt the ThreadX kernel or USB stack. */
     HAL_NVIC_SetPriority(SAI1_IRQn, 5, 0);
 }
-#endif
 /* USER CODE END 1 */

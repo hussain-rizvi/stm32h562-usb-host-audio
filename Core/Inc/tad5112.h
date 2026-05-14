@@ -15,5 +15,8 @@ void tad5112_vol_down(void);
 void tad5112_vol_apply(void);
 /* Set volume register directly (thread context). val clamped to [TAD_VOL_MIN, TAD_VOL_MAX]. */
 void tad5112_set_vol(uint8_t val);
+/* Query current limit state (safe from any context after tad5112_vol_apply). */
+int tad5112_at_max(void);
+int tad5112_at_min(void);
 
 #endif /* TAD5112_H */

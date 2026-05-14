@@ -22,7 +22,7 @@ extern "C" {
 
 #include "stm32h5xx_hal.h"
 /* USER CODE BEGIN Includes */
-
+#include "main.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -137,7 +137,7 @@ extern TX_SEMAPHORE sd_rx_semaphore;
 #define FX_STM32_SD_READ_CPLT_NOTIFY()                  do { \
                                                           if(tx_semaphore_get(&sd_rx_semaphore, 2 * TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS) \
                                                             { \
-                                                              NVIC_SystemReset(); \
+                                                              system_soft_reset(); \
                                                             } \
                                                         } while(0)
 
@@ -149,7 +149,7 @@ extern TX_SEMAPHORE sd_rx_semaphore;
 #define FX_STM32_SD_WRITE_CPLT_NOTIFY()                 do { \
                                                           if(tx_semaphore_get(&sd_tx_semaphore, 2 * TX_TIMER_TICKS_PER_SECOND) != TX_SUCCESS) \
                                                             { \
-                                                              NVIC_SystemReset(); \
+                                                              system_soft_reset(); \
                                                             } \
                                                         } while(0)
 

@@ -62,15 +62,10 @@ UINT audio_playback_is_active(VOID);
 VOID audio_skip_track(VOID);
 /* Toggle play/pause. Safe to call from ISR. */
 VOID audio_play_pause(VOID);
-/* Volume step (3 dB per press). Handles both SAI DAC and USB speaker. Safe to call from ISR. */
-VOID audio_vol_up(VOID);
-VOID audio_vol_down(VOID);
-#ifdef AUDIO_OUTPUT_SAI
 /* SAI analogue output path — plays WAV/MP3 from SD card through the on-board I2S DAC.
    Pass usb_audio != NULL to simultaneously mirror audio to a USB speaker (dual output).
    Pass UX_NULL for SAI-only mode. */
 VOID audio_playback_sai_files(FX_MEDIA *media, UX_HOST_CLASS_AUDIO *usb_audio);
-#endif
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

@@ -166,6 +166,16 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
+  /* Variables that must survive software resets (NVIC_SystemReset) but are
+     cleared on a real power-on.  Startup code does NOT zero this region. */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >RAM
+
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :
   {

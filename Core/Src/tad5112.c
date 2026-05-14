@@ -14,10 +14,9 @@
 #define TAD5112_VOL_0DB  201U
 #define TAD5112_VOL_MUTE 0x00U
 
-/* val = 201 + (gain_dB * 2);  step of 6 = 3 dB per press */
-#define TAD5112_VOL_MIN   21U   /* ~-90 dB */
-#define TAD5112_VOL_MAX  221U   /* ~+10 dB */
-#define TAD5112_VOL_STEP   6U   /* 3 dB    */
+#define TAD5112_VOL_MIN   21U   /* -90 dB  — practical lower bound */
+#define TAD5112_VOL_MAX  221U   /* +10 dB  — practical upper bound */
+#define TAD5112_VOL_STEP   6U   /*  3 dB per button press */
 
 static I2C_HandleTypeDef *s_hi2c;
 static uint8_t           s_vol       = TAD5112_VOL_0DB;
@@ -91,6 +90,9 @@ void tad5112_set_vol(uint8_t val)
     s_vol = val;
     vol_write(s_vol);
 }
+
+int tad5112_at_max(void) { return s_vol >= TAD5112_VOL_MAX; }
+int tad5112_at_min(void) { return s_vol <= TAD5112_VOL_MIN; }
 
 void tad5112_sleep(void)
 {

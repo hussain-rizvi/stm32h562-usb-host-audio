@@ -17,6 +17,16 @@ static TX_TIMER          s_led_timer;
 static volatile LedState s_led_state = LED_OFF;
 static uint8_t           s_tick;
 
+/* PA0/PA1 ready LED */
+static uint8_t s_ready_on = 0;
+
+/* PA2/PA3 volume LEDs */
+static uint8_t s_vol_playing   = 0;
+static uint8_t s_vol2_pressing = 0;  /* up button currently held */
+static uint8_t s_vol2_at_limit = 0;  /* at max while held */
+static uint8_t s_vol3_pressing = 0;  /* down button currently held */
+static uint8_t s_vol3_at_limit = 0;  /* at min while held */
+
 static VOID led_cb(ULONG arg)
 {
     (void)arg;
@@ -43,6 +53,34 @@ static VOID led_cb(ULONG arg)
                           on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         break;
     }
+
+    /* PA0/PA1 — ready-to-play indicator (solid on/off, no blink) */
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0 | GPIO_PIN_1,
+                      s_ready_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    /* PA2 — vol-up LED: blink while held, fast-blink if at max, solid when released */
+    if (s_vol2_pressing)
+    {
+        on = s_vol2_at_limit ? ((s_tick % 2U) == 0U) : ((s_tick % 8U) < 4U);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2,
+                          s_vol_playing ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+
+    /* PA3 — vol-down LED: blink while held, fast-blink if at min, solid when released */
+    if (s_vol3_pressing)
+    {
+        on = s_vol3_at_limit ? ((s_tick % 2U) == 0U) : ((s_tick % 8U) < 4U);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3,
+                          s_vol_playing ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
 }
 
 void config_led_init(void)
@@ -55,26 +93,25 @@ void config_led_init(void)
 
 void led_version_blink(void)
 {
-    /* Major version: FW_VERSION_MAJOR long pulses (600 ms on, 300 ms off) */
+    /* Major version: FW_VERSION_MAJOR long pulses (800 ms on, 300 ms off) */
     for (UINT i = 0U; i < FW_VERSION_MAJOR; i++)
     {
         HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
-        tx_thread_sleep(MS_TO_TICKS(600U));
+        HAL_Delay(800U);
         HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
-        tx_thread_sleep(MS_TO_TICKS(300U));
+        HAL_Delay(300U);
     }
-    tx_thread_sleep(MS_TO_TICKS(800U));   /* gap between major and minor groups */
+    HAL_Delay(1000U);  /* gap between major and minor groups */
 
-    /* Minor version: FW_VERSION_MINOR short pulses (200 ms on, 150 ms between) */
+    /* Minor version: FW_VERSION_MINOR short pulses (500 ms on, 200 ms off) */
     for (UINT i = 0U; i < FW_VERSION_MINOR; i++)
     {
         HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
-        tx_thread_sleep(MS_TO_TICKS(200U));
+        HAL_Delay(500U);
         HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
-        if (i + 1U < FW_VERSION_MINOR)
-            tx_thread_sleep(MS_TO_TICKS(150U));
+        HAL_Delay(200U);
     }
-    tx_thread_sleep(MS_TO_TICKS(1000U));  /* end pause before timer takes over */
+    HAL_Delay(1000U);  /* end pause before LED timer takes over */
 }
 
 void led_timer_start(void)
@@ -86,6 +123,25 @@ void led_timer_start(void)
 void led_set_state(LedState state)
 {
     s_led_state = state;
+}
+
+void ready_led_set(int on)
+{
+    s_ready_on = on ? 1U : 0U;
+}
+
+void vol_led_set_playing(int is_playing)
+{
+    s_vol_playing  = is_playing ? 1U : 0U;
+    if (!is_playing) { s_vol2_pressing = 0U; s_vol3_pressing = 0U; }
+}
+
+void vol_led_update(int dn_pressing, int dn_at_limit, int up_pressing, int up_at_limit)
+{
+    s_vol3_pressing = dn_pressing  ? 1U : 0U;
+    s_vol3_at_limit = dn_at_limit  ? 1U : 0U;
+    s_vol2_pressing = up_pressing  ? 1U : 0U;
+    s_vol2_at_limit = up_at_limit  ? 1U : 0U;
 }
 
 /* ── Config parsing ──────────────────────────────────────────────────────── */
@@ -205,14 +261,6 @@ void config_read_from_sd(FX_MEDIA *media)
     if (g_config.default_vol > g_config.max_vol) g_config.default_vol = g_config.max_vol;
 }
 
-void config_apply_default_output(void)
-{
-    /* Output mode comes from config.txt — always overwrite TAMP so the audio
-       thread picks up the correct mode after every boot. */
-    HAL_PWR_EnableBkUpAccess();
-    __HAL_RCC_RTC_CLK_ENABLE();
-    TAMP->BKP0R = (g_config.default_output == 0U) ? 0x5A000002U : 0x5A000001U;
-}
 
 /* ── Volume mapping ──────────────────────────────────────────────────────── */
 

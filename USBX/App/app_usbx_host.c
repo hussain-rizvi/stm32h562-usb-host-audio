@@ -126,80 +126,47 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
   /* USER CODE BEGIN app_ux_host_thread_entry */
   TX_PARAMETER_NOT_USED(thread_input);
 
-  /* Read reset source before clearing — SFTRST means NVIC_SystemReset (SD removal, etc.). */
-  const int is_soft_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != 0U);
-  __HAL_RCC_CLEAR_RESET_FLAGS();
-
-  MX_USBX_Host_Stack_Init();
-
-  /* Show firmware version only on cold boot, skip on software reset. */
-  if (!is_soft_reset)
-  {
-    led_version_blink();
-  }
   led_timer_start();
 
-#ifdef AUDIO_OUTPUT_SAI
-  /* Wait for FileX thread to mount SD and write config.txt output mode to TAMP. */
+  /* Wait for FileX to mount SD and populate g_config from config.txt (or defaults).
+     Output mode, volume, and range are all valid once this flag is set. */
   {
+    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
     ULONG _flags;
     tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &_flags, TX_WAIT_FOREVER);
   }
-  /* Output mode is set by config.txt defaultOutput via TAMP backup register. */
-  HAL_PWR_EnableBkUpAccess();
-  int use_usb_output = (TAMP->BKP0R == 0x5A000002U);
-#endif
+
+  /* Only initialise the USB host stack when USB output is selected (config.txt defaultOutput=USB).
+     SAI/Analog mode never needs VBUS, HCD, or ISO transfers. */
+  const int use_usb_output = (g_config.default_output == 0U);
+  if (use_usb_output)
+    MX_USBX_Host_Stack_Init();
 
   while (1)
   {
-    extern TX_EVENT_FLAGS_GROUP sd_event_flags;
     extern FX_MEDIA sdio_disk;
 
-#ifdef AUDIO_OUTPUT_SAI
     if (!use_usb_output)
     {
-      /* SAI path: wait for SD (mandatory), then give USB speaker up to 3 s to
-         enumerate.  If no speaker is found within the timeout, audio_speaker
-         stays NULL and SAI-only mode activates automatically. */
-      ULONG sd_flags;
       extern I2C_HandleTypeDef hi2c1;
-      tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
-      tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
-                         TX_AND, &sd_flags, 3 * TX_TIMER_TICKS_PER_SECOND);
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
-      /* Initialize TAD5112 CODEC via I2C: wake, set I2S+32-bit, enable DAC */
       tad5112_init(&hi2c1);
       tad5112_set_vol(config_vol_to_tad());
-      /* SAI-only mode — no USB thread. PA4 toggle selects SAI or USB, not both. */
+      ready_led_set(1);
       audio_playback_sai_files(&sdio_disk, UX_NULL);
     }
     else
     {
-      /* USB-only path: wait for both USB speaker and SD card */
       ULONG actual_flags;
-      ULONG sd_flags;
       tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
                          TX_AND, &actual_flags, TX_WAIT_FOREVER);
-      tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
       if (audio_speaker != UX_NULL)
       {
         tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+        ready_led_set(1);
         audio_playback_wav_files(audio_speaker, &sdio_disk);
       }
     }
-#else
-    /* USB path: wait for both USB speaker and SD card */
-    ULONG actual_flags;
-    ULONG sd_flags;
-    tx_event_flags_get(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED,
-                       TX_AND, &actual_flags, TX_WAIT_FOREVER);
-    tx_event_flags_get(&sd_event_flags, 0x01UL, TX_AND, &sd_flags, TX_WAIT_FOREVER);
-    if (audio_speaker != UX_NULL)
-    {
-      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
-      audio_playback_wav_files(audio_speaker, &sdio_disk);
-    }
-#endif
   }
   /* USER CODE END app_ux_host_thread_entry */
 }
@@ -259,7 +226,7 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
       /* USER CODE BEGIN UX_DEVICE_REMOVAL */
       if ((UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
       {
-        NVIC_SystemReset();
+        system_soft_reset();
       }
       /* USER CODE END UX_DEVICE_REMOVAL */
 

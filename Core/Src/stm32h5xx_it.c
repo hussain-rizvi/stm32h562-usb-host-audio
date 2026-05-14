@@ -275,12 +275,9 @@ void SAI1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-#ifdef AUDIO_OUTPUT_SAI
 extern DMA_HandleTypeDef hdma_sai1_a;
 void GPDMA1_Channel0_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_sai1_a);
 }
-#endif
-
 /* USER CODE END 1 */

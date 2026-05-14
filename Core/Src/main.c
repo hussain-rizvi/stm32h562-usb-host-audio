@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "tad5112.h"
 #include "ux_host_audio.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,18 +101,6 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  /* Enable TAMP/RTC APB clock and backup-domain write access early — before
-     any EXTI can fire and before the app thread reads BKP0R for mode selection. */
-  __HAL_RCC_RTC_CLK_ENABLE();
-  HAL_PWR_EnableBkUpAccess();
-  /* First-write warm-up: on a cold power-on BKP0R = 0.  The very first write
-     that is immediately followed by NVIC_SystemReset() does not survive on
-     STM32H5 because the backup domain has not yet been "touched" in this
-     power cycle.  Writing the SAI sentinel here (before any reset occurs)
-     initialises the backup domain so the subsequent PA4 callback write persists.
-     If BKP0R is already non-zero the device was just reset — leave it alone. */
-  if (TAMP->BKP0R == 0U)
-      TAMP->BKP0R = 0x5A000001U;   /* SAI mode default */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -123,11 +112,13 @@ int main(void)
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   /* SD_EN is asserted in MX_GPIO_Init (powers slot). No PA10 VBUS GPIO in current pinout. */
-#ifdef AUDIO_OUTPUT_SAI
   extern void sai_dma_msp_setup(SAI_HandleTypeDef *hsai);
   sai_dma_msp_setup(&hsai_BlockA1);
   tad5112_init(&hi2c1);
-#endif
+
+  /* Skip version blink if we reset ourselves (SD removal, DMA timeout, etc.). */
+  if (!system_is_soft_reset())
+      led_version_blink();
   /* USER CODE END 2 */
 
   MX_ThreadX_Init();
@@ -444,6 +435,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, MUTE_Pin|SD_EN_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PA4 PA5 PA6 */
   GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
@@ -478,14 +470,29 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* PA6 (vol up) and PA7 (vol down) — plain inputs, polled in audio loops.
-     Disabling EXTI6 NVIC prevents double-fire: generated code enables it for PA6
-     as EXTI6, but we poll instead so the interrupt must be masked. */
-  GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+  /* PA0–PA3: output LEDs (ready: PA0/PA1, vol-up: PA2, vol-down: PA3) */
+  GPIO_InitStruct.Pin   = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* PA6 (vol down) and PA7 (vol up) — plain inputs, polled in audio loops.
+     PULLDOWN keeps pins at 0 V when buttons are open; prevents spurious HIGH
+     reads that would make the volume LEDs blink during normal playback.
+     Disabling EXTI6 NVIC prevents double-fire from the generated EXTI6 config. */
+  GPIO_InitStruct.Pin  = GPIO_PIN_6 | GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   HAL_NVIC_DisableIRQ(EXTI6_IRQn);
+  __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_6);
+  /* PA4/PA5: same active-LOW circuit as vol buttons — re-init as falling edge so
+     the interrupt fires on press (pin goes LOW), not on release (slow pull-up rise). */
+  GPIO_InitStruct.Pin  = GPIO_PIN_4 | GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   /* SD_CD (PC7): override generated NOPULL with internal pull-up so the pin
      rises cleanly when the card is removed and the CD switch opens. Without a
      pull-up the pin floats and EXTI7 IT_RISING never fires reliably. */
@@ -506,11 +513,11 @@ uint8_t SD_CardIsPresent(void)
    PA6/PA7: volume down/up — plain inputs, polled every ~21 ms in audio loops.
    PC7: SD_CD card-detect — rising edge (card removed) → NVIC_SystemReset (EXTI7).
    Output mode (SAI/USB) is read from config.txt on the SD card. */
-#define BTN_UI_DEBOUNCE_MS  200U
+#define BTN_UI_DEBOUNCE_MS  50U
 static volatile uint32_t s_btn4_last_ms = 0;
 static volatile uint32_t s_btn5_last_ms = 0;
 
-void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_4)
   {
@@ -526,12 +533,16 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     s_btn5_last_ms = now;
     audio_skip_track();
   }
-  else if (GPIO_Pin == GPIO_PIN_7)
+}
+
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_7)
   {
     /* PC7/SD_CD: confirm removal by reading pin back — genuine removal keeps
        the pin HIGH (pull-up wins); a glitch has already returned LOW. */
     if (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == GPIO_PIN_SET)
-      NVIC_SystemReset();
+      system_soft_reset();
   }
 }
 
