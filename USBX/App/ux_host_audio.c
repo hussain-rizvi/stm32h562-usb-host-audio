@@ -79,6 +79,12 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 /* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
 static volatile UINT s_audio_playback_abort;
 
+/* Consecutive ISO OUT errors — reset board when this crosses the threshold.
+   Detects speaker removal when hub interrupt polling is stopped (no hub class
+   removal event) by watching for a burst of URB_ERROR completions. */
+#define AUDIO_ISO_ERROR_RESET_THRESHOLD  20
+static volatile UINT s_iso_consecutive_errors = 0;
+
 /* ISO completion diagnostics — inspect in debugger after ~10 s of playback.
    g_iso_complete_count should grow at ~1000/sec (one per USB frame).
    g_iso_stall_50ms_count > 0 means the ISO pipeline stalled (no completions for 50 ms).
@@ -186,7 +192,15 @@ static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
     g_iso_complete_count++;
     if (xfer->ux_host_class_audio_transfer_request_completion_code != UX_SUCCESS)
+    {
         g_iso_error_count++;
+        if (++s_iso_consecutive_errors >= AUDIO_ISO_ERROR_RESET_THRESHOLD)
+            NVIC_SystemReset();
+    }
+    else
+    {
+        s_iso_consecutive_errors = 0;
+    }
     tx_semaphore_put(&audio_xfer_semaphore);
 }
 
@@ -947,10 +961,14 @@ static VOID ring_sem_flush(VOID)
 
 static UINT ring_submit(UX_HOST_CLASS_AUDIO *audio, UINT idx, ULONG pkt_size)
 {
+    /* Must be zero: the HCD submits the next transfer as
+       data_ptr + actual_length, so a stale value from the previous
+       completion causes it to read from the wrong PMA offset → cracking. */
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_actual_length       = 0;
     audio_ring_xfer[idx].ux_host_class_audio_transfer_request_data_pointer        = audio_ring_buf[idx];
-    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_requested_length     = pkt_size;
-    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_packet_size          = pkt_size;
-    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_completion_function  = audio_transfer_complete;
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_requested_length    = pkt_size;
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_packet_size         = pkt_size;
+    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_completion_function = audio_transfer_complete;
     return ux_host_class_audio_write(audio, &audio_ring_xfer[idx]);
 }
 

@@ -82,6 +82,31 @@
    port-change bits show the audio device's port — this blocks ISO OUT frames. */
 volatile uint32_t g_ep_schedule_block_count = 0;
 
+/* Set to 1 by the application once the USB speaker is playing audio.
+   Suppresses hub INTR IN every frame (NAK-spinning starves ISO OUT → cracking).
+   One poll is still allowed every HUB_SLOW_POLL_FRAMES SOFs so the hub class
+   can detect speaker removal (→ UX_DEVICE_REMOVAL → NVIC_SystemReset). */
+volatile UINT g_hub_poll_stop = 0;
+static volatile uint32_t s_hub_slow_count = 0;
+#define HUB_SLOW_POLL_FRAMES  20000U  /* ~20 s between removal-detection polls */
+
+/* Diagnostic: counts HAL_HCD_HC_SubmitRequest calls from the slow poll path.
+   Should increment roughly every 12 s while audio plays through a hub.
+   Stays at 0 → slow poll not reaching submission (sch_mode/interval/state issue). */
+volatile uint32_t g_hub_slow_poll_submit_count = 0;
+
+/* Set to 1 just before the slow-poll HAL_HCD_HC_SubmitRequest.  Cleared in the
+   callback after the hub INTR IN response is parsed inline (without waking the
+   hub class thread, which would run control transfers and cause a crack). */
+volatile uint8_t g_hub_slow_poll_active = 0;
+
+/* Deferred hub INTR IN submit: the HAL call is moved to AFTER the while loop so
+   the ISO OUT TX FIFO write completes before hub INTR IN is armed.  The NAK IRQ
+   from hub INTR IN would otherwise fire mid-FIFO-write and cause a brief underrun. */
+static uint8_t              s_hub_submit_after_loop = 0U;
+static UX_HCD_STM32_ED     *s_hub_intr_ed           = UX_NULL;
+
+
 UINT  _ux_hcd_stm32_periodic_schedule(UX_HCD_STM32 *hcd_stm32)
 {
 
@@ -173,7 +198,7 @@ USHORT              port_status_change_bits;
 
                     if ((port_status_change_bits & (0x1U << endpoint->ux_endpoint_device->ux_device_port_location)) != 0U)
                     {
-                      ep_schedule = 0U;
+                      /* ISO OUT is fire-and-forget — do not block on hub port change. */
                     }
                   }
                 }
@@ -203,10 +228,49 @@ USHORT              port_status_change_bits;
       else
 #endif /* defined (USBH_HAL_HUB_SPLIT_SUPPORTED) */
       {
+        UINT do_sched = 1U;
+
+        /* Hub INTR IN NAK-spins inside the USB frame and starves ISO OUT.
+           Suppress it while audio plays; allow one poll every ~2 s so the
+           hub class can still detect speaker removal → NVIC_SystemReset(). */
+        if (g_hub_poll_stop && (ed -> ux_stm32_ed_type == EP_TYPE_INTR) &&
+            (ed -> ux_stm32_ed_transfer_request != UX_NULL))
+        {
+            if (++s_hub_slow_count < HUB_SLOW_POLL_FRAMES)
+            {
+                ed -> ux_stm32_ed_transfer_request -> ux_transfer_request_actual_length = 0;
+                do_sched = 0U;
+            }
+            else
+            {
+                /* Counter expired: prepare hub INTR IN but defer the HAL submit
+                   to after the while loop.  Submitting inside the loop arms hub
+                   INTR IN in the same SOF as ISO OUT; the NAK IRQ fires while the
+                   OTG TX FIFO write is in progress → underrun → audible jitter. */
+                s_hub_slow_count = 0U;
+                transfer_request = ed -> ux_stm32_ed_transfer_request;
+                if (transfer_request != UX_NULL)
+                {
+                    ed -> ux_stm32_ed_packet_length = transfer_request -> ux_transfer_request_requested_length;
+                    /* Assign data pointer directly (DMA disabled on STM32H562 FS host,
+                       so no aligned-buffer alloc/free needed for hub INTR IN). */
+                    ed -> ux_stm32_ed_data = transfer_request -> ux_transfer_request_data_pointer;
+                    endpoint = (UX_ENDPOINT *) transfer_request -> ux_transfer_request_endpoint;
+                    if (endpoint -> ux_endpoint_device -> ux_device_state == UX_DEVICE_CONFIGURED)
+                    {
+                        s_hub_intr_ed = ed;
+                        s_hub_submit_after_loop = 1U;
+                    }
+                }
+                do_sched = 0U;
+            }
+        }
+
         /* Check if the periodic transfer should be scheduled in this frame.  */
         /* Interval Mask is 0:     it's scheduled every SOF/uSOF.  */
         /* Interval Mask is not 0: check position to see if it's scheduled.  */
-        if ((frame_index & ed -> ux_stm32_ed_interval_mask) == ed -> ux_stm32_ed_interval_position)
+        if (do_sched &&
+            (frame_index & ed -> ux_stm32_ed_interval_mask) == ed -> ux_stm32_ed_interval_position)
         {
 
           /* Get the transfer request.  */
@@ -256,7 +320,8 @@ USHORT              port_status_change_bits;
 
                   if ((port_status_change_bits & (0x1U << endpoint->ux_endpoint_device->ux_device_port_location)) != 0U)
                   {
-                    ep_schedule = 0U;
+                    /* ISO OUT is fire-and-forget — blocking it here causes audible
+                       cracking.  Removal is handled via UX_DEVICE_REMOVAL → reset. */
                     g_ep_schedule_block_count++;
                   }
                 }
@@ -285,6 +350,29 @@ USHORT              port_status_change_bits;
 
         /* Point to the next ED in the list.  */
         ed =  ed -> ux_stm32_ed_next_ed;
+    }
+
+    /* Deferred hub INTR IN submission: ISO OUT FIFO write is now complete for
+       this SOF, so arming hub INTR IN here cannot interrupt the write path. */
+    if (s_hub_submit_after_loop)
+    {
+        UX_HCD_STM32_ED *hub_ed = s_hub_intr_ed;
+        s_hub_submit_after_loop = 0U;
+        s_hub_intr_ed = UX_NULL;
+        if (hub_ed != UX_NULL)
+        {
+            transfer_request = hub_ed -> ux_stm32_ed_transfer_request;
+            if (transfer_request != UX_NULL && hub_ed -> ux_stm32_ed_data != UX_NULL)
+            {
+                g_hub_slow_poll_submit_count++;
+                g_hub_slow_poll_active = 1U;
+                HAL_HCD_HC_SubmitRequest(hcd_stm32 -> hcd_handle, hub_ed -> ux_stm32_ed_channel,
+                                         hub_ed -> ux_stm32_ed_dir,
+                                         hub_ed -> ux_stm32_ed_type, USBH_PID_DATA,
+                                         hub_ed -> ux_stm32_ed_data,
+                                         hub_ed -> ux_stm32_ed_packet_length, 0U);
+            }
+        }
     }
 
     /* Return to caller.  */

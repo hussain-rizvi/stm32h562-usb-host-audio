@@ -95,6 +95,13 @@ UX_INTERRUPT_SAVE_AREA
     /* Disable interrupt.  */
     UX_DISABLE
 
+    /* Zero actual_length so the periodic scheduler's hub-blocking check
+       (actual_length != 0) never sees a stale value from the previous
+       completion.  Without this, the hub interrupt endpoint's actual_length
+       stays at 1-2 after the last successful poll; the scheduler reads the
+       old port-change bits and blocks ISO OUT every frame → cracking. */
+    transfer_request -> ux_transfer_request_actual_length = 0;
+
 #if defined(UX_HOST_STANDALONE)
 
     /* Check if transfer is still in progress.  */

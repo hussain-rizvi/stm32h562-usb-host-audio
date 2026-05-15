@@ -67,7 +67,7 @@ uint8_t SD_CardIsPresent(void);
 /* USER CODE BEGIN Private defines */
 /* Define AUDIO_OUTPUT_SAI to route playback through the on-board I2S DAC (SAI1).
    Comment it out to use a connected USB audio speaker instead. */
-#define AUDIO_OUTPUT_SAI
+/* #define AUDIO_OUTPUT_SAI */
 
 /** Override if your CD net is active-high when a card is inserted (default: low = inserted). */
 #ifndef SD_CD_INSERTED_LEVEL

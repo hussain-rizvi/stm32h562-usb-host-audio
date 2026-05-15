@@ -37,6 +37,10 @@
    Should stay at 0 during normal hub playback after the fix is applied. */
 volatile uint32_t g_iso_cb_nonzero_actual = 0;
 
+/* Shared with ux_hcd_stm32_periodic_schedule.c and app_usbx_host.c. */
+extern volatile uint8_t g_hub_slow_poll_active;
+extern volatile UINT    g_speaker_hub_port;
+
 /**************************************************************************/
 /*                                                                        */
 /*  FUNCTION                                               RELEASE        */
@@ -364,6 +368,44 @@ UX_TRANSFER         *transfer_next;
             default:
                 /* Set the completion code to transfer error.  */
                 transfer_request -> ux_transfer_request_completion_code =  UX_TRANSFER_ERROR;
+            }
+
+            /* Slow-poll hub INTR IN interception.
+               When the hub responds to our forced slow-poll token, parse the
+               port-change bitmap here in the ISR instead of waking the hub class
+               thread.  The hub class runs GetPortStatus control transfers which
+               overlap with ISO OUT frames and cause audible cracking.
+               - Speaker's port bit set  → NVIC_SystemReset() (removal detected).
+               - Zero-length response    → re-arm silently (no change, no crack).
+               - Other bit set (rare)    → fall through so hub class handles it
+                 (acceptable: non-speaker events are uncommon during audio). */
+            if (g_hub_slow_poll_active &&
+                (urb_state == URB_DONE) &&
+                (ed -> ux_stm32_ed_type == EP_TYPE_INTR) &&
+                (ed -> ux_stm32_ed_dir == 1U))
+            {
+                g_hub_slow_poll_active = 0U;
+                if (transfer_request -> ux_transfer_request_actual_length == 0U)
+                {
+                    ed -> ux_stm32_ed_sch_mode = 1U;
+                    return;
+                }
+                USHORT port_change;
+                if (transfer_request -> ux_transfer_request_actual_length == 1U)
+                    port_change = *(USHORT *) transfer_request -> ux_transfer_request_data_pointer;
+                else
+                    port_change = (USHORT)_ux_utility_short_get(
+                                      transfer_request -> ux_transfer_request_data_pointer);
+                if ((g_speaker_hub_port > 0U) &&
+                    ((port_change & (1U << g_speaker_hub_port)) != 0U))
+                    NVIC_SystemReset();
+                /* port_change == 0 or non-speaker bit: never wake the hub class
+                   thread while audio plays.  GetPortStatus control transfers
+                   from the hub class would overlap ISO OUT → crack / no audio.
+                   Re-arm silently and return. */
+                transfer_request -> ux_transfer_request_actual_length = 0U;
+                ed -> ux_stm32_ed_sch_mode = 1U;
+                return;
             }
 
             /* Finish current transfer.  */

@@ -53,6 +53,11 @@ static TX_THREAD ux_host_app_thread;
 static UX_HOST_CLASS_AUDIO *audio_speaker = UX_NULL;
 static TX_EVENT_FLAGS_GROUP audio_event_flags;
 
+/* Hub port number (1-based) on which the audio speaker is connected.
+   Set at enumeration; read by the slow-poll interception in the callback
+   to distinguish speaker-port removal from other hub events. */
+volatile UINT g_speaker_hub_port = 0U;
+
 #ifdef AUDIO_OUTPUT_SAI
 /* Independent USB audio thread — runs audio_playback_wav_files on the same
    proven path as USB-only mode, completely decoupled from the SAI thread. */
@@ -179,6 +184,11 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
     if (audio_speaker != UX_NULL)
     {
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+      /* Stop per-frame hub INTR IN polling (NAK-spinning starves ISO OUT).
+         The periodic scheduler still allows one poll every ~2 s for removal
+         detection; on removal the hub class fires UX_DEVICE_REMOVAL → reset. */
+      extern volatile UINT g_hub_poll_stop;
+      g_hub_poll_stop = 1;
       audio_playback_wav_files(audio_speaker, &sdio_disk);
     }
 #endif
@@ -235,6 +245,7 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
                 ((ep->ux_endpoint_descriptor.bEndpointAddress & 0x80U) == 0U))
             {
               audio_speaker = audio_instance;
+              g_speaker_hub_port = audio_instance -> ux_host_class_audio_device -> ux_device_port_location;
               tx_event_flags_set(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED, TX_OR);
             }
           }
