@@ -369,7 +369,7 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 0;
+  hsd1.Init.ClockDiv = 3;  /* 250 MHz PLL1Q / (2×3) = 41.7 MHz, within 50 MHz HS limit */
   /* Ignore failure here — card may not be inserted at boot.
      The FileX thread calls HAL_SD_Init before each mount attempt. */
   HAL_SD_Init(&hsd1);

@@ -148,7 +148,7 @@ void vol_led_update(int dn_pressing, int dn_at_limit, int up_pressing, int up_at
 
 void config_load_defaults(void)
 {
-    g_config.default_output = 0;
+    g_config.default_output = 1;
     g_config.default_vol    = 6;
     g_config.max_vol        = 10;
     g_config.min_vol        = 1;
