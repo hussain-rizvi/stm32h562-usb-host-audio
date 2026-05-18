@@ -506,7 +506,7 @@ uint8_t SD_CardIsPresent(void)
 /* PA4: play/pause.  PA5: next track.
    PA6/PA7: volume down/up — plain inputs, polled every ~21 ms in audio loops.
    PC7: SD_CD card-detect — rising edge (card removed) → system_soft_reset() (EXTI7). */
-#define BTN_UI_DEBOUNCE_MS  50U
+#define BTN_UI_DEBOUNCE_MS  20U
 static volatile uint32_t s_btn4_last_ms = 0;
 static volatile uint32_t s_btn5_last_ms = 0;
 
