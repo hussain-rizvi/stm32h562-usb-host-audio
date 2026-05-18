@@ -25,7 +25,8 @@
 /* USER CODE BEGIN Includes */
 #include "tx_api.h"
 #include "main.h"
-UINT audio_playback_is_active(VOID);
+#include "ux_host_audio.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,6 +118,7 @@ UINT MX_FileX_Init(VOID *memory_ptr)
   {
     return TX_GROUP_ERROR;
   }
+  config_led_init();
 /* USER CODE END MX_FileX_Init */
 
 /* Initialize FileX.  */
@@ -146,10 +148,20 @@ UINT MX_FileX_Init(VOID *memory_ptr)
    * only when USB audio is not reading from the card. */
   for (;;)
   {
-    while (SD_CardIsPresent() == 0U)
+    int card_just_inserted = 0;
+    if (SD_CardIsPresent() == 0U)
     {
-      tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+      led_set_state(LED_BLINK_NO_CARD);
+      while (SD_CardIsPresent() == 0U)
+      {
+        tx_thread_sleep(SD_MOUNT_RETRY_DELAY_TICKS);
+      }
+      card_just_inserted = 1;
     }
+    /* Spring-loaded reader bounces on physical insertion — only wait when
+       the card was just inserted, not on reboot with card already present. */
+    if (card_just_inserted)
+      tx_thread_sleep(2U * TX_TIMER_TICKS_PER_SECOND);
 
     for (;;)
     {
@@ -180,12 +192,17 @@ UINT MX_FileX_Init(VOID *memory_ptr)
       continue;
     }
 
+    led_set_state(LED_OFF);  /* audio thread sets LED_ON per file, LED_BLINK_NO_AUDIO if none found */
+
     tx_event_flags_set(&sd_event_flags, SD_FLAG_MEDIA_READY, TX_OR);
 
-    /* SD removal is now handled by GPIO interrupt (EXTI7) in main.c which
-       calls NVIC_SystemReset() instantly. Nothing to do here. */
+    /* EXTI7 on PC7/SD_CD already triggers system_soft_reset on card removal; poll here as a backup. */
     for (;;)
-      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
+    {
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
+        if (SD_CardIsPresent() == 0U)
+            system_soft_reset();
+    }
   }
 
 /* USER CODE END fx_app_thread_entry 0*/

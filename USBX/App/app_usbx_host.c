@@ -27,6 +27,7 @@
 #include "ux_host_audio.h"
 #include "app_filex.h"
 #include "tad5112.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -144,6 +145,8 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
   /* USER CODE BEGIN app_ux_host_thread_entry */
   TX_PARAMETER_NOT_USED(thread_input);
 
+  led_timer_start();
+
   MX_USBX_Host_Stack_Init();
 
   while (1)
@@ -188,9 +191,8 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
          The periodic scheduler still allows one poll every ~2 s for removal
          detection; on removal the hub class fires UX_DEVICE_REMOVAL → reset. */
       extern volatile UINT  g_hub_poll_stop;
-      extern volatile uint8_t g_hub_poll_trigger;  /* set to 1 from button to check removal */
-      (void)g_hub_poll_trigger;                    /* suppress unused warning until button added */
       g_hub_poll_stop = 1;
+      ready_led_set(1);
       audio_playback_wav_files(audio_speaker, &sdio_disk);
     }
 #endif
@@ -266,7 +268,7 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
                                         _ux_system_host_class_audio_name)) == UX_SUCCESS &&
           (UX_HOST_CLASS_AUDIO *)current_instance == audio_speaker)
       {
-        NVIC_SystemReset();
+        system_soft_reset();
       }
       /* USER CODE END UX_DEVICE_REMOVAL */
 

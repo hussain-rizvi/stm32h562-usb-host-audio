@@ -27,6 +27,7 @@
 #include "tad5112.h"
 #include "tx_api.h"
 #include "fx_api.h"
+#include "audio_config.h"
 /* minimp3 inner decode loops (MDCT/QMF) must run fast regardless of project
    build config.  -O0 (Debug) makes one frame take ~80 ms on Cortex-M33 —
    far longer than the 26 ms frame duration — causing guaranteed underrun.
@@ -79,29 +80,62 @@ static TX_SEMAPHORE audio_xfer_semaphore;
 /* Set by USB removal / error path; playback thread polls this so unplug does not wait full ISO timeout. */
 static volatile UINT s_audio_playback_abort;
 
-/* Consecutive ISO OUT errors — reset board when this crosses the threshold.
-   Detects speaker removal when hub interrupt polling is stopped (no hub class
-   removal event) by watching for a burst of URB_ERROR completions. */
-#define AUDIO_ISO_ERROR_RESET_THRESHOLD  20
-static volatile UINT s_iso_consecutive_errors = 0;
+static volatile UINT s_skip_track     = 0;  /* set by PA5 press */
+static volatile UINT s_playback_paused = 1;  /* start paused; PA4 press toggles */
 
-/* ISO completion diagnostics — inspect in debugger after ~10 s of playback.
-   g_iso_complete_count should grow at ~1000/sec (one per USB frame).
-   g_iso_stall_50ms_count > 0 means the ISO pipeline stalled (no completions for 50 ms).
-   g_iso_error_count: completions with non-UX_SUCCESS code (signal integrity / dropped ISO). */
-volatile uint32_t g_iso_complete_count = 0;
-volatile uint32_t g_iso_stall_50ms_count = 0;
-volatile uint32_t g_iso_error_count = 0;
-/* 0 = PLL3Q active, 1 = PLL3Q config failed (HAL_ERROR), 2 = timeout, 3 = busy, 0xFF = not attempted */
-volatile uint32_t g_usb_clock_source = 0xFF;
 
-/* Hub-specific diagnostics (hub connection only).
-   g_ep_schedule_block_count: SOF frames where the hub port-change check blocked
-     ISO OUT — should be 0 during normal playback (hub actual_length == 0).
-   g_iso_cb_nonzero_actual: times the callback-path ISO OUT submit had non-zero
-     actual_length — should be 0 after the actual_length fix is in place. */
-extern volatile uint32_t g_ep_schedule_block_count;
-extern volatile uint32_t g_iso_cb_nonzero_actual;
+/* USB speaker volume state — probe min/max/res once on first press, track internally */
+static volatile int8_t s_usb_vol_delta  = 0;
+static UINT            s_usb_vol_init   = 0;
+static int32_t         s_usb_vol_cur    = 0;
+static int32_t         s_usb_vol_min    = 0;
+static int32_t         s_usb_vol_max    = 0;
+static int32_t         s_usb_vol_step   = 256;      /* 1 dB default, updated from GET_RES */
+
+/* Hold-to-repeat volume: fires once on first press, then repeats every VOL_REPEAT_MS
+   after VOL_HOLD_DELAY_MS of continuous hold. */
+#define VOL_HOLD_DELAY_MS    400U
+#define VOL_REPEAT_MS         80U
+#define VOL_LED_DEBOUNCE_MS   50U  /* button must be held this long before LED blinks */
+static uint32_t s_vol_pa6_press_ms = 0, s_vol_pa6_last_ms = 0;
+static uint32_t s_vol_pa7_press_ms = 0, s_vol_pa7_last_ms = 0;
+/* Armed = pin confirmed LOW (button open) at least once since last unpause.
+   Prevents a false press if the pin is already HIGH when playback starts. */
+static uint8_t s_vol_pa6_armed = 0;
+static uint8_t s_vol_pa7_armed = 0;
+
+/* PA6 = physical vol-UP button, PA7 = physical vol-DOWN button, both active-LOW
+   (external pull-up keeps pins HIGH at rest; button press pulls to GND). */
+#define POLL_VOL_BUTTONS_USB() do { \
+    if (!s_playback_paused) { \
+        uint32_t _t = HAL_GetTick(); \
+        int _up = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6) == GPIO_PIN_RESET); \
+        int _dn = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7) == GPIO_PIN_RESET); \
+        if (!_up) { s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 1; } \
+        else if (s_vol_pa6_armed) { \
+            if (!s_vol_pa6_press_ms) { s_usb_vol_delta++; \
+                s_vol_pa6_press_ms = _t ? _t : 1U; s_vol_pa6_last_ms = _t; } \
+            else if ((_t - s_vol_pa6_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa6_last_ms) >= VOL_REPEAT_MS) \
+                { s_usb_vol_delta++; s_vol_pa6_last_ms = _t; } \
+        } \
+        if (!_dn) { s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 1; } \
+        else if (s_vol_pa7_armed) { \
+            if (!s_vol_pa7_press_ms) { s_usb_vol_delta--; \
+                s_vol_pa7_press_ms = _t ? _t : 1U; s_vol_pa7_last_ms = _t; } \
+            else if ((_t - s_vol_pa7_press_ms) >= VOL_HOLD_DELAY_MS && (_t - s_vol_pa7_last_ms) >= VOL_REPEAT_MS) \
+                { s_usb_vol_delta--; s_vol_pa7_last_ms = _t; } \
+        } \
+        vol_led_update(s_vol_pa7_press_ms != 0U && (_t - s_vol_pa7_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       s_usb_vol_init && (s_usb_vol_cur <= s_usb_vol_min), \
+                       s_vol_pa6_press_ms != 0U && (_t - s_vol_pa6_press_ms) >= VOL_LED_DEBOUNCE_MS, \
+                       s_usb_vol_init && (s_usb_vol_cur >= s_usb_vol_max)); \
+        vol_led_set_playing(1); \
+    } else { \
+        s_vol_pa6_press_ms = 0; s_vol_pa6_armed = 0; \
+        s_vol_pa7_press_ms = 0; s_vol_pa7_armed = 0; \
+        vol_led_set_playing(0); \
+    } \
+} while(0)
 
 /* Separate active flags so SAI and USB threads can run concurrently without
    one clearing the other's flag and allowing FileX to close the media early. */
@@ -122,7 +156,6 @@ static UINT audio_wait_xfer_done(VOID)
     {
         if (tx_semaphore_get(&audio_xfer_semaphore, AUDIO_XFER_WAIT_TICKS) == TX_SUCCESS)
             return UX_SUCCESS;
-        g_iso_stall_50ms_count++;
         if ((tx_time_get() - t0) >= AUDIO_XFER_SEMAPHORE_TIMEOUT)
             return UX_ERROR;
     }
@@ -177,6 +210,16 @@ VOID audio_playback_usb_disconnect_notify(VOID)
     s_audio_playback_abort = TX_TRUE;
 }
 
+VOID audio_skip_track(VOID)
+{
+    s_skip_track = TX_TRUE;
+}
+
+VOID audio_play_pause(VOID)
+{
+    s_playback_paused = !s_playback_paused;
+}
+
 UINT audio_playback_is_active(VOID)
 {
     return s_audio_playback_active || s_audio_playback_active_usb;
@@ -190,17 +233,7 @@ static mp3d_sample_t s_mp3_pcm_buf[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
 static VOID audio_transfer_complete(UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST *xfer)
 {
-    g_iso_complete_count++;
-    if (xfer->ux_host_class_audio_transfer_request_completion_code != UX_SUCCESS)
-    {
-        g_iso_error_count++;
-        if (++s_iso_consecutive_errors >= AUDIO_ISO_ERROR_RESET_THRESHOLD)
-            NVIC_SystemReset();
-    }
-    else
-    {
-        s_iso_consecutive_errors = 0;
-    }
+    (void)xfer;
     tx_semaphore_put(&audio_xfer_semaphore);
 }
 
@@ -803,14 +836,11 @@ static UINT wav_parse_header(FX_FILE *file, WAV_INFO *info)
  *   In dual SAI+USB mode the SAI half fires every ~21 ms; SD reads and ThreadX
  *   scheduling can delay the thread by up to 10 ms, so the pre-filled lead must
  *   exceed (half_period + max_delay) = ~32 ms — AUDIO_INFLIGHT=48 gives 16 ms margin.
- *   Through a hub, the hub interrupt endpoint competes with audio isochronous in
- *   the same USB frame every ~256 ms, adding ~1 ms jitter.  AUDIO_INFLIGHT=60
- *   gives 60 ms headroom, absorbing hub-induced scheduling variance.
  *   AUDIO_RING_SLOTS must be > AUDIO_INFLIGHT to avoid wrap-around overlap.
  *   RAM cost: 64 × 256 = 16 KB.
  */
 #define AUDIO_RING_SLOTS  64
-#define AUDIO_INFLIGHT    60
+#define AUDIO_INFLIGHT    48
 
 static UCHAR audio_ring_buf[AUDIO_RING_SLOTS][AUDIO_MAX_PACKET_SIZE] __attribute__((aligned(4)));
 static UX_HOST_CLASS_AUDIO_TRANSFER_REQUEST audio_ring_xfer[AUDIO_RING_SLOTS];
@@ -961,10 +991,6 @@ static VOID ring_sem_flush(VOID)
 
 static UINT ring_submit(UX_HOST_CLASS_AUDIO *audio, UINT idx, ULONG pkt_size)
 {
-    /* Must be zero: the HCD submits the next transfer as
-       data_ptr + actual_length, so a stale value from the previous
-       completion causes it to read from the wrong PMA offset → cracking. */
-    audio_ring_xfer[idx].ux_host_class_audio_transfer_request_actual_length       = 0;
     audio_ring_xfer[idx].ux_host_class_audio_transfer_request_data_pointer        = audio_ring_buf[idx];
     audio_ring_xfer[idx].ux_host_class_audio_transfer_request_requested_length    = pkt_size;
     audio_ring_xfer[idx].ux_host_class_audio_transfer_request_packet_size         = pkt_size;
@@ -982,18 +1008,75 @@ static VOID ring_drain_inflight(UINT inflight)
     }
 }
 
+/* Apply any pending USB volume delta. Probes min/max/res on first call. */
+static VOID usb_vol_apply(UX_HOST_CLASS_AUDIO *audio)
+{
+    int8_t d = s_usb_vol_delta;
+    if (d == 0) return;
+    s_usb_vol_delta = 0;
+
+    if (!s_usb_vol_init)
+    {
+        UX_HOST_CLASS_AUDIO_CONTROL ctrl = {0};
+        ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+        ctrl.ux_host_class_audio_control_channel = 0;
+        ctrl.ux_host_class_audio_control_entity  = audio->ux_host_class_audio_feature_unit_id;
+
+        if (ux_host_class_audio_control_value_get(audio, &ctrl) != UX_SUCCESS)
+            return;
+        s_usb_vol_cur = (int32_t)(int16_t)(uint16_t)ctrl.ux_host_class_audio_control_cur;
+
+        {
+            UX_HOST_CLASS_AUDIO_CONTROL range_ctrl = {0};
+            range_ctrl.ux_host_class_audio_control         = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+            range_ctrl.ux_host_class_audio_control_channel = 0;
+            range_ctrl.ux_host_class_audio_control_entity  = audio->ux_host_class_audio_feature_unit_id;
+            if (ux_host_class_audio_control_get(audio, &range_ctrl) == UX_SUCCESS)
+            {
+                s_usb_vol_min = (int32_t)(int16_t)(uint16_t)range_ctrl.ux_host_class_audio_control_min;
+                s_usb_vol_max = (int32_t)(int16_t)(uint16_t)range_ctrl.ux_host_class_audio_control_max;
+                ULONG res     = range_ctrl.ux_host_class_audio_control_res;
+                if (res > 0U && res < 0x8000U)
+                    s_usb_vol_step = (int32_t)res;
+            }
+        }
+
+        /* Fallback: if device returned degenerate bounds (both 0), use a safe range. */
+        if (s_usb_vol_min >= s_usb_vol_max)
+        {
+            s_usb_vol_min = -127 * 256;  /* -127 dB */
+            s_usb_vol_max = 0;            /* 0 dB */
+        }
+
+        s_usb_vol_init = 1;
+        /* Keep the device's current volume (GET_CUR) as the starting point */
+    }
+
+    s_usb_vol_cur += (int32_t)d * s_usb_vol_step;
+    if (s_usb_vol_cur < s_usb_vol_min) s_usb_vol_cur = s_usb_vol_min;
+    if (s_usb_vol_cur > s_usb_vol_max) s_usb_vol_cur = s_usb_vol_max;
+
+    /* Send to left (ch1) and right (ch2) separately — many devices ignore master ch0 */
+    UX_HOST_CLASS_AUDIO_CONTROL set_ctrl = {0};
+    set_ctrl.ux_host_class_audio_control     = UX_HOST_CLASS_AUDIO_VOLUME_CONTROL;
+    set_ctrl.ux_host_class_audio_control_cur = (ULONG)(uint16_t)(int16_t)s_usb_vol_cur;
+
+    set_ctrl.ux_host_class_audio_control_channel = 1;
+    ux_host_class_audio_control_value_set(audio, &set_ctrl);
+
+    set_ctrl.ux_host_class_audio_control_channel = 2;
+    ux_host_class_audio_control_value_set(audio, &set_ctrl);
+}
+
 static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO *info)
 {
-    UINT  status          = UX_SUCCESS;
+    UINT status = UX_SUCCESS;
     ULONG packet_size;
     ULONG remaining;
     ULONG bytes_read;
     ULONG to_read;
-    UINT  wr              = 0;
-    UINT  inflight        = 0;
-    ULONG frac_acc        = 0;   /* sub-sample fractional accumulator (0..999) */
-    ULONG bytes_per_frame;       /* varies per USB frame to hit exact sample rate */
-    ULONG bytes_per_sample;
+    UINT  wr       = 0;
+    UINT  inflight = 0;
     UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
 
     audio_sampling.ux_host_class_audio_sampling_channels   = info->channels;
@@ -1006,134 +1089,110 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
 
     packet_size = ux_host_class_audio_packet_size_get(audio);
     if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
-        return UX_ERROR;
-
-    /* bytes_per_sample used by the fractional accumulator.
-     * packet_size = floor(sample_rate/1000) * bytes_per_sample (integer division).
-     * mps = endpoint wMaxPacketSize = ceil(sample_rate/1000) * bytes_per_sample
-     *       for a compliant device (e.g. 180 for 44100 Hz stereo 16-bit).
-     * The accumulator adds the fractional remainder each frame so the long-run
-     * average matches the true sample rate: e.g. 44100 Hz → 9×176 + 1×180 per
-     * 10 ms window.  bytes_per_frame is capped at mps so the frame always fits
-     * in one USB transaction (no spurious 4-byte continuation packets). */
-    bytes_per_sample = (ULONG)info->channels * ((ULONG)info->bits_per_sample / 8U);
-    {
-        ULONG mps = ux_host_class_audio_max_packet_size_get(audio);
-        if (mps == 0 || mps > AUDIO_MAX_PACKET_SIZE) mps = packet_size;
-        /* Store mps in packet_size; original floor value no longer needed. */
-        packet_size = mps;
-    }
+        return UX_ERROR;  /* unsupported format — skip file */
 
     drain_reset();
     ring_sem_flush();
     remaining = info->data_size;
 
-#define NEXT_FRAME_BYTES()                                              \
-    do {                                                                \
-        frac_acc += info->sample_rate % 1000U;                         \
-        ULONG _extra = frac_acc / 1000U;                               \
-        frac_acc %= 1000U;                                             \
-        bytes_per_frame = (info->sample_rate / 1000U + _extra)         \
-                          * bytes_per_sample;                           \
-        if (bytes_per_frame > packet_size)                             \
-            bytes_per_frame = packet_size;                             \
-    } while (0)
-
     /* ---- Phase 1: pre-fill AUDIO_INFLIGHT slots before entering steady state ---- */
     while (inflight < AUDIO_INFLIGHT && remaining > 0)
     {
-        NEXT_FRAME_BYTES();
-        to_read = (remaining > bytes_per_frame) ? bytes_per_frame : remaining;
-        status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
-        if (status != FX_SUCCESS || bytes_read == 0)
-            goto done;
+        if (s_skip_track) { s_skip_track = 0; goto done; }
 
-        if (bytes_read < bytes_per_frame)
-            memset(audio_ring_buf[wr] + bytes_read, 0, bytes_per_frame - bytes_read);
+        if (s_playback_paused)
+        {
+            memset(audio_ring_buf[wr], 0, packet_size);
+        }
+        else
+        {
+            to_read = (remaining > packet_size) ? packet_size : remaining;
+            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            if (status != FX_SUCCESS || bytes_read == 0)
+                goto done;
 
-        status = ring_submit(audio, wr, bytes_per_frame);
+            if (bytes_read < packet_size)
+                memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+            remaining -= to_read;
+        }
+
+        status = ring_submit(audio, wr, packet_size);
         if (status != UX_SUCCESS)
             goto done;
 
         wr = (wr + 1U) % AUDIO_RING_SLOTS;
         inflight++;
-        remaining -= to_read;
     }
 
     /* ---- Phase 2: steady state — one completion in, one new packet out ---- */
     while (remaining > 0)
     {
+        /* Block until oldest in-flight slot completes. */
         status = audio_wait_xfer_done();
         if (status != UX_SUCCESS)
             goto done;
         inflight--;
 
-        NEXT_FRAME_BYTES();
-        to_read = (remaining > bytes_per_frame) ? bytes_per_frame : remaining;
-        status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
-        if (status != FX_SUCCESS || bytes_read == 0)
-            goto done;
+        if (s_skip_track) { s_skip_track = 0; goto done; }
 
-        if (bytes_read < bytes_per_frame)
-            memset(audio_ring_buf[wr] + bytes_read, 0, bytes_per_frame - bytes_read);
+        POLL_VOL_BUTTONS_USB();
+        usb_vol_apply(audio);
 
-        status = ring_submit(audio, wr, bytes_per_frame);
+        if (s_playback_paused)
+        {
+            memset(audio_ring_buf[wr], 0, packet_size);
+        }
+        else
+        {
+            to_read = (remaining > packet_size) ? packet_size : remaining;
+            status  = drain_read(file, audio_ring_buf[wr], to_read, &bytes_read);
+            if (status != FX_SUCCESS || bytes_read == 0)
+                goto done;
+
+            if (bytes_read < packet_size)
+                memset(audio_ring_buf[wr] + bytes_read, 0, packet_size - bytes_read);
+            remaining -= to_read;
+        }
+
+        status = ring_submit(audio, wr, packet_size);
         if (status != UX_SUCCESS)
             goto done;
 
         wr = (wr + 1U) % AUDIO_RING_SLOTS;
         inflight++;
-        remaining -= to_read;
     }
-
-#undef NEXT_FRAME_BYTES
 
 done:
     ring_drain_inflight(inflight);
     return (status == UX_SUCCESS || status == FX_SUCCESS) ? UX_SUCCESS : status;
 }
 
-static UINT str_ends_with_wav(CHAR *name)
+/* Case-insensitive 3-char extension match: pass lowercase letters. */
+static UINT str_ends_with_ext(CHAR *name, CHAR a, CHAR b, CHAR c)
 {
     UINT len = 0;
     while (name[len] != '\0')
         len++;
     if (len < 4)
         return 0;
-    return ((name[len-4] == '.') &&
-            (name[len-3] == 'w' || name[len-3] == 'W') &&
-            (name[len-2] == 'a' || name[len-2] == 'A') &&
-            (name[len-1] == 'v' || name[len-1] == 'V'));
-}
-
-static UINT str_ends_with_mp3(CHAR *name)
-{
-    UINT len = 0;
-    while (name[len] != '\0')
-        len++;
-    if (len < 4)
-        return 0;
-    return ((name[len-4] == '.') &&
-            (name[len-3] == 'm' || name[len-3] == 'M') &&
-            (name[len-2] == 'p' || name[len-2] == 'P') &&
-            (name[len-1] == '3'));
+    return (name[len-4] == '.' &&
+            (name[len-3] | 0x20) == a &&
+            (name[len-2] | 0x20) == b &&
+            (name[len-1] | 0x20) == c);
 }
 
 static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 {
     mp3dec_frame_info_t info;
-    ULONG mp3_size       = 0;
-    UINT  sampling_set   = 0;
+    ULONG mp3_size    = 0;
+    UINT  sampling_set = 0;
     UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
-    ULONG packet_size    = AUDIO_MAX_PACKET_SIZE;
-    ULONG next_slot_size = AUDIO_MAX_PACKET_SIZE;  /* per-packet target (fractional rate) */
-    ULONG frac_acc       = 0;
-    ULONG bytes_per_sample = 0;
-    UINT  wr             = 0;
-    UINT  inflight       = 0;
-    UINT  status         = UX_SUCCESS;
+    ULONG packet_size = AUDIO_MAX_PACKET_SIZE;
+    UINT  wr          = 0;
+    UINT  inflight    = 0;
+    UINT  status      = UX_SUCCESS;
     int   consumed, samples, pcm_bytes;
-    ULONG slot_fill      = 0;
+    ULONG slot_fill   = 0;  /* bytes filled in audio_ring_buf[wr] so far */
 
     mp3dec_init(&s_mp3_decoder);
     drain_reset();
@@ -1143,6 +1202,33 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
     while (1)
     {
+        if (s_skip_track) { s_skip_track = 0; break; }
+
+        POLL_VOL_BUTTONS_USB();
+        usb_vol_apply(audio);
+
+        if (s_playback_paused)
+        {
+            if (sampling_set && packet_size > 0)
+            {
+                if (inflight == AUDIO_INFLIGHT)
+                {
+                    status = audio_wait_xfer_done();
+                    if (status != UX_SUCCESS) goto mp3_done;
+                    inflight--;
+                }
+                memset(audio_ring_buf[wr], 0, packet_size);
+                (void)ring_submit(audio, wr, packet_size);
+                wr = (wr + 1U) % AUDIO_RING_SLOTS;
+                inflight++;
+            }
+            else
+            {
+                tx_thread_sleep(1);
+            }
+            continue;
+        }
+
         /* Refill the MP3 input window whenever it drops below one max frame.
            drain_read buffers 4 KB chunks from SD so the refill rarely stalls
            on a raw fx_file_read — same benefit the WAV path gets. */
@@ -1191,18 +1277,10 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
             packet_size = ux_host_class_audio_packet_size_get(audio);
             if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
             {
-                status = UX_ERROR;
+                status = UX_ERROR;  /* unsupported format — skip file */
                 goto mp3_done;
             }
-            {
-                ULONG mps = ux_host_class_audio_max_packet_size_get(audio);
-                if (mps == 0 || mps > AUDIO_MAX_PACKET_SIZE) mps = packet_size;
-                packet_size = mps;
-            }
-            bytes_per_sample = (ULONG)info.channels * 2U;  /* 16-bit */
-            next_slot_size   = packet_size;
-            frac_acc         = 0;
-            sampling_set     = 1;
+            sampling_set = 1;
         }
 
         /* Pack PCM into ring slots without breaking at frame boundaries.
@@ -1210,15 +1288,11 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
          * fill the start of the next slot instead of being zero-padded.
          * Zero-padding only happens once, on the very last partial slot at EOF.
          * Without this, 44.1 kHz MP3 (4608 PCM bytes, 176-byte packets) inserts
-         * 144 silence bytes every 26 ms (~38 Hz buzz).
-         *
-         * next_slot_size varies per packet using a fractional accumulator so the
-         * long-run average matches the true sample rate (e.g. 44100 Hz →
-         * 9×176 + 1×180 bytes per 10-ms window). */
+         * 144 silence bytes every 26 ms (~38 Hz buzz). */
         int pcm_offset = 0;
         while (pcm_offset < pcm_bytes)
         {
-            int space = (int)next_slot_size - (int)slot_fill;
+            int space = (int)packet_size - (int)slot_fill;
             int take  = pcm_bytes - pcm_offset;
             if (take > space) take = space;
 
@@ -1227,7 +1301,7 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
             slot_fill  += (ULONG)take;
             pcm_offset += take;
 
-            if (slot_fill >= next_slot_size)
+            if (slot_fill == packet_size)
             {
                 if (inflight == AUDIO_INFLIGHT)
                 {
@@ -1236,37 +1310,26 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
                         goto mp3_done;
                     inflight--;
                 }
-                status = ring_submit(audio, wr, next_slot_size);
+                status = ring_submit(audio, wr, packet_size);
                 if (status != UX_SUCCESS)
                     goto mp3_done;
                 wr = (wr + 1U) % AUDIO_RING_SLOTS;
                 inflight++;
                 slot_fill = 0;
-
-                /* Compute size for next slot using fractional accumulator */
-                if (bytes_per_sample > 0)
-                {
-                    frac_acc += (ULONG)info.hz % 1000U;
-                    ULONG _extra = frac_acc / 1000U;
-                    frac_acc %= 1000U;
-                    next_slot_size = ((ULONG)info.hz / 1000U + _extra) * bytes_per_sample;
-                    if (next_slot_size > packet_size)   /* cap at MPS */
-                        next_slot_size = packet_size;
-                }
             }
         }
     }
 
     /* Flush partial last slot at EOF */
-    if (slot_fill > 0 && next_slot_size > 0)
+    if (slot_fill > 0 && packet_size > 0)
     {
-        memset(audio_ring_buf[wr] + slot_fill, 0, next_slot_size - slot_fill);
+        memset(audio_ring_buf[wr] + slot_fill, 0, packet_size - slot_fill);
         if (inflight == AUDIO_INFLIGHT)
         {
             (void)audio_wait_xfer_done();
             inflight--;
         }
-        (void)ring_submit(audio, wr, next_slot_size);
+        (void)ring_submit(audio, wr, packet_size);
         inflight++;
     }
 
@@ -1296,6 +1359,7 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
 
     while (1)
     {
+        UINT files_played = 0;
         status = fx_directory_first_entry_find(media, entry_name);
 
         /* If the directory scan itself fails (SD removed, media error) exit
@@ -1311,8 +1375,9 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
                                          &file_size, UX_NULL, UX_NULL,
                                          UX_NULL, UX_NULL, UX_NULL, UX_NULL);
 
-            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_wav(entry_name))
+            if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'w', 'a', 'v'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 /* File found in directory but cannot open = SD removed or IO error.
                    Must goto done — silently skipping would loop forever on cached
@@ -1324,21 +1389,31 @@ VOID audio_playback_wav_files(UX_HOST_CLASS_AUDIO *audio, FX_MEDIA *media)
                 if (status == FX_SUCCESS)
                     status = audio_stream_wav(audio, &audio_file, &wav_info);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS)
                     goto done;
             }
-            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_mp3(entry_name))
+            else if (!(file_attributes & FX_DIRECTORY) && str_ends_with_ext(entry_name, 'm', 'p', '3'))
             {
+                led_set_state(LED_ON);
                 status = fx_file_open(media, &audio_file, entry_name, FX_OPEN_FOR_READ);
                 if (status != FX_SUCCESS)
                     goto done;
                 status = audio_stream_mp3(audio, &audio_file);
                 fx_file_close(&audio_file);
+                files_played++;
                 if (status != FX_SUCCESS && status != UX_SUCCESS)
                     goto done;
             }
 
             status = fx_directory_next_entry_find(media, entry_name);
+        }
+
+        if (files_played == 0)
+        {
+            vol_led_set_playing(0);
+            led_set_state(LED_BLINK_NO_AUDIO);
+            tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);  /* wait before retrying scan */
         }
     }
 

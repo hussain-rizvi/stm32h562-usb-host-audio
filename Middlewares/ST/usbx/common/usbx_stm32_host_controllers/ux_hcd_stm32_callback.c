@@ -29,6 +29,7 @@
 #include "ux_api.h"
 #include "ux_hcd_stm32.h"
 #include "ux_host_stack.h"
+#include "main.h"
 
 /* Diagnostic: counts times ISO OUT callback submits transfer_next with
    non-zero actual_length.  Non-zero means the fix in
@@ -398,7 +399,7 @@ UX_TRANSFER         *transfer_next;
                                       transfer_request -> ux_transfer_request_data_pointer);
                 if ((g_speaker_hub_port > 0U) &&
                     ((port_change & (1U << g_speaker_hub_port)) != 0U))
-                    NVIC_SystemReset();
+                    system_soft_reset();
                 /* port_change == 0 or non-speaker bit: never wake the hub class
                    thread while audio plays.  GetPortStatus control transfers
                    from the hub class would overlap ISO OUT → crack / no audio.

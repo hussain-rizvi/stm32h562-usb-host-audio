@@ -22,7 +22,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#ifdef AUDIO_OUTPUT_SAI
 #include "tad5112.h"
+#endif
+#include "ux_host_audio.h"
+#include "audio_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,9 +46,10 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+#ifdef AUDIO_OUTPUT_SAI
 I2C_HandleTypeDef hi2c1;
-
 SAI_HandleTypeDef hsai_BlockA1;
+#endif
 
 SD_HandleTypeDef hsd1;
 
@@ -61,8 +66,10 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_USB_HCD_Init(void);
 static void MX_SDMMC1_SD_Init(void);
+#ifdef AUDIO_OUTPUT_SAI
 static void MX_SAI1_Init(void);
 static void MX_I2C1_Init(void);
+#endif
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -107,8 +114,10 @@ int main(void)
   MX_ICACHE_Init();
   MX_USB_HCD_Init();
   MX_SDMMC1_SD_Init();
+#ifdef AUDIO_OUTPUT_SAI
   MX_SAI1_Init();
   MX_I2C1_Init();
+#endif
   /* USER CODE BEGIN 2 */
   /* SD_EN is asserted in MX_GPIO_Init (powers slot). No PA10 VBUS GPIO in current pinout. */
 #ifdef AUDIO_OUTPUT_SAI
@@ -116,6 +125,10 @@ int main(void)
   sai_dma_msp_setup(&hsai_BlockA1);
   tad5112_init(&hi2c1);
 #endif
+
+  /* Skip version blink if we reset ourselves (SD removal, DMA timeout, etc.). */
+  if (!system_is_soft_reset())
+      led_version_blink();
   /* USER CODE END 2 */
 
   MX_ThreadX_Init();
@@ -206,6 +219,7 @@ void SystemClock_Config(void)
   __HAL_FLASH_SET_PROGRAM_DELAY(FLASH_PROGRAMMING_DELAY_2);
 }
 
+#ifdef AUDIO_OUTPUT_SAI
 /**
   * @brief I2C1 Initialization Function
   * @param None
@@ -253,6 +267,7 @@ static void MX_I2C1_Init(void)
   /* USER CODE END I2C1_Init 2 */
 
 }
+#endif /* AUDIO_OUTPUT_SAI */
 
 /**
   * @brief ICACHE Initialization Function
@@ -286,6 +301,7 @@ static void MX_ICACHE_Init(void)
 
 }
 
+#ifdef AUDIO_OUTPUT_SAI
 /**
   * @brief SAI1 Initialization Function
   * @param None
@@ -345,6 +361,7 @@ static void MX_SAI1_Init(void)
   /* USER CODE END SAI1_Init 2 */
 
 }
+#endif /* AUDIO_OUTPUT_SAI */
 
 /**
   * @brief SDMMC1 Initialization Function
@@ -425,15 +442,23 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, MUTE_Pin|SD_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : MUTE_Pin SD_EN_Pin */
-  GPIO_InitStruct.Pin = MUTE_Pin|SD_EN_Pin;
+  /*Configure GPIO pins : PA4 PA5 — play/pause and skip (EXTI falling, active-LOW buttons) */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : STATUS_LED_Pin MUTE_Pin SD_EN_Pin */
+  GPIO_InitStruct.Pin = STATUS_LED_Pin|MUTE_Pin|SD_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -444,28 +469,78 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
-  HAL_NVIC_SetPriority(EXTI7_IRQn, 7, 0);
+
+  /* EXTI interrupt init */
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI5_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI7_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* PA6 (vol-up) and PA7 (vol-down) — plain inputs, polled in audio loops.
+     External pull-up keeps pins HIGH at rest; button press pulls to GND. */
+  GPIO_InitStruct.Pin  = GPIO_PIN_6 | GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /* PA0–PA3: output LEDs (ready: PA0/PA1, vol-up: PA2, vol-down: PA3) */
+  GPIO_InitStruct.Pin   = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-uint8_t sd_cd;
 uint8_t SD_CardIsPresent(void)
 {
-	sd_cd = HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin);
   return (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == SD_CD_INSERTED_LEVEL) ? 1U : 0U;
 }
 
-/* SD card removal detected instantly via GPIO interrupt — no polling delay,
-   no SDMMC timeout wait. Rising edge = SD_CD goes HIGH = card removed. */
+/* PA4: play/pause.  PA5: next track.
+   PA6/PA7: volume down/up — plain inputs, polled every ~21 ms in audio loops.
+   PC7: SD_CD card-detect — rising edge (card removed) → system_soft_reset() (EXTI7). */
+#define BTN_UI_DEBOUNCE_MS  50U
+static volatile uint32_t s_btn4_last_ms = 0;
+static volatile uint32_t s_btn5_last_ms = 0;
+
+extern volatile uint8_t g_hub_poll_trigger;
+
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_4)
+  {
+    uint32_t now = HAL_GetTick();
+    if (now - s_btn4_last_ms < BTN_UI_DEBOUNCE_MS) return;
+    s_btn4_last_ms = now;
+    g_hub_poll_trigger = 1;
+    audio_play_pause();
+  }
+  else if (GPIO_Pin == GPIO_PIN_5)
+  {
+    uint32_t now = HAL_GetTick();
+    if (now - s_btn5_last_ms < BTN_UI_DEBOUNCE_MS) return;
+    s_btn5_last_ms = now;
+    g_hub_poll_trigger = 1;
+    audio_skip_track();
+  }
+}
+
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == SD_CD_Pin)
-    NVIC_SystemReset();
+  if (GPIO_Pin == GPIO_PIN_7)
+  {
+    /* PC7/SD_CD: confirm removal by reading pin back — genuine removal keeps
+       the pin HIGH (pull-up wins); a glitch has already returned LOW. */
+    if (HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin) == GPIO_PIN_SET)
+      system_soft_reset();
+  }
 }
 
 /* USER CODE END 4 */

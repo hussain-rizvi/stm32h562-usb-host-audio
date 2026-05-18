@@ -54,21 +54,24 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 uint8_t SD_CardIsPresent(void);
+/* Marks this reset as app-initiated, then resets. Use instead of NVIC_SystemReset(). */
+void system_soft_reset(void);
+/* Returns 1 (and clears the mark) if this boot followed a system_soft_reset() call. */
+int system_is_soft_reset(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define STATUS_LED_Pin GPIO_PIN_5
+#define STATUS_LED_GPIO_Port GPIOB
 #define MUTE_Pin GPIO_PIN_10
 #define MUTE_GPIO_Port GPIOB
 #define SD_EN_Pin GPIO_PIN_14
 #define SD_EN_GPIO_Port GPIOB
 #define SD_CD_Pin GPIO_PIN_7
 #define SD_CD_GPIO_Port GPIOC
+#define SD_CD_EXTI_IRQn EXTI7_IRQn
 
 /* USER CODE BEGIN Private defines */
-/* Define AUDIO_OUTPUT_SAI to route playback through the on-board I2S DAC (SAI1).
-   Comment it out to use a connected USB audio speaker instead. */
-/* #define AUDIO_OUTPUT_SAI */
-
 /** Override if your CD net is active-high when a card is inserted (default: low = inserted). */
 #ifndef SD_CD_INSERTED_LEVEL
 #define SD_CD_INSERTED_LEVEL GPIO_PIN_RESET

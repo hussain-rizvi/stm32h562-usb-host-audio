@@ -55,7 +55,9 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+#ifdef AUDIO_OUTPUT_SAI
 extern SAI_HandleTypeDef hsai_BlockA1;
+#endif
 extern SD_HandleTypeDef hsd1;
 extern HCD_HandleTypeDef hhcd_USB_DRD_FS;
 extern TIM_HandleTypeDef htim2;
@@ -163,6 +165,62 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles EXTI Line4 interrupt.
+  */
+void EXTI4_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI4_IRQn 0 */
+
+  /* USER CODE END EXTI4_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
+  /* USER CODE BEGIN EXTI4_IRQn 1 */
+
+  /* USER CODE END EXTI4_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI Line5 interrupt.
+  */
+void EXTI5_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI5_IRQn 0 */
+
+  /* USER CODE END EXTI5_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_5);
+  /* USER CODE BEGIN EXTI5_IRQn 1 */
+
+  /* USER CODE END EXTI5_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI Line6 interrupt.
+  */
+void EXTI6_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI6_IRQn 0 */
+
+  /* USER CODE END EXTI6_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_6);
+  /* USER CODE BEGIN EXTI6_IRQn 1 */
+
+  /* USER CODE END EXTI6_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI Line7 interrupt.
+  */
+void EXTI7_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI7_IRQn 0 */
+
+  /* USER CODE END EXTI7_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(SD_CD_Pin);
+  /* USER CODE BEGIN EXTI7_IRQn 1 */
+
+  /* USER CODE END EXTI7_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM2 global interrupt.
   */
 void TIM2_IRQHandler(void)
@@ -207,6 +265,7 @@ void SDMMC1_IRQHandler(void)
 /**
   * @brief This function handles Serial Audio Interface 1 global interrupt.
   */
+#ifdef AUDIO_OUTPUT_SAI
 void SAI1_IRQHandler(void)
 {
   /* USER CODE BEGIN SAI1_IRQn 0 */
@@ -217,6 +276,7 @@ void SAI1_IRQHandler(void)
 
   /* USER CODE END SAI1_IRQn 1 */
 }
+#endif /* AUDIO_OUTPUT_SAI */
 
 /* USER CODE BEGIN 1 */
 #ifdef AUDIO_OUTPUT_SAI
@@ -226,9 +286,4 @@ void GPDMA1_Channel0_IRQHandler(void)
     HAL_DMA_IRQHandler(&hdma_sai1_a);
 }
 #endif
-
-void EXTI7_IRQHandler(void)
-{
-    HAL_GPIO_EXTI_IRQHandler(SD_CD_Pin);
-}
 /* USER CODE END 1 */
