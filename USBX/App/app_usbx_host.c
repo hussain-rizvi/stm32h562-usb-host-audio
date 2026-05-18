@@ -187,7 +187,9 @@ static VOID app_ux_host_thread_entry(ULONG thread_input)
       /* Stop per-frame hub INTR IN polling (NAK-spinning starves ISO OUT).
          The periodic scheduler still allows one poll every ~2 s for removal
          detection; on removal the hub class fires UX_DEVICE_REMOVAL → reset. */
-      extern volatile UINT g_hub_poll_stop;
+      extern volatile UINT  g_hub_poll_stop;
+      extern volatile uint8_t g_hub_poll_trigger;  /* set to 1 from button to check removal */
+      (void)g_hub_poll_trigger;                    /* suppress unused warning until button added */
       g_hub_poll_stop = 1;
       audio_playback_wav_files(audio_speaker, &sdio_disk);
     }
