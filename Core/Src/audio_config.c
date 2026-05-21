@@ -52,6 +52,12 @@ static VOID led_cb(ULONG arg)
         HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin,
                           on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         break;
+    case LED_BLINK_ENUM_FAIL:
+        /* 100 ms on / 100 ms off at 100 ms/tick → toggle every tick */
+        on = (s_tick % 2U) < 1U;
+        HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin,
+                          on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        break;
     }
 
     /* PA0/PA1 — ready-to-play indicator (solid on/off, no blink) */

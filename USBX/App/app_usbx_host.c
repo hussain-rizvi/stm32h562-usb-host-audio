@@ -65,6 +65,30 @@ extern HCD_HandleTypeDef hhcd_USB_DRD_FS;
 
 /* USER CODE BEGIN PFP */
 
+/* Walk all alternate settings of the streaming interface (alt-0 has no endpoint).
+   The first non-zero alternate setting's endpoint direction tells us speaker vs mic.
+   This must be checked here — at enumeration time the active alt is 0, so
+   ux_host_class_audio_isochronous_endpoint is NULL for both speaker and mic. */
+static int audio_streaming_is_speaker(UX_HOST_CLASS_AUDIO *audio)
+{
+    UCHAR intf_num = audio->ux_host_class_audio_streaming_interface
+                          ->ux_interface_descriptor.bInterfaceNumber;
+    UX_INTERFACE *alt = audio->ux_host_class_audio_streaming_interface;
+    while (alt != UX_NULL)
+    {
+        if (alt->ux_interface_descriptor.bInterfaceNumber == intf_num &&
+            alt->ux_interface_descriptor.bAlternateSetting != 0U &&
+            alt->ux_interface_first_endpoint != UX_NULL)
+        {
+            /* OUT endpoint (bit7 = 0) → speaker; IN endpoint (bit7 = 1) → mic */
+            return (alt->ux_interface_first_endpoint
+                       ->ux_endpoint_descriptor.bEndpointAddress & 0x80U) == 0U;
+        }
+        alt = alt->ux_interface_next_interface;
+    }
+    return 0; /* no usable alt setting found — reject */
+}
+
 /* USER CODE END PFP */
 
 /**
@@ -198,22 +222,16 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
         if (_ux_host_class_audio_subclass_get(audio_instance) ==
             UX_HOST_CLASS_AUDIO_SUBCLASS_STREAMING)
         {
-          /* Only accept the first streaming instance — the callback can fire multiple
-             times (once per streaming interface: speaker + mic, or per alternate setting).
-             Overwriting audio_speaker with a second instance (e.g. a mic or alt-0
-             interface) causes a HardFault when stop is called on an instance with no
-             active endpoint. */
-          if (audio_speaker == UX_NULL)
+          /* Devices with mic+speaker+HID fire this callback once per streaming
+             interface.  At alt-0 the isochronous_endpoint is always NULL for both
+             speaker and mic, so we cannot use it to filter direction here.
+             Instead walk the non-zero alternate settings to find the endpoint
+             direction — OUT (bit7=0) = speaker, IN (bit7=1) = mic/capture.
+             Accept only the first OUT streaming interface. */
+          if (audio_speaker == UX_NULL && audio_streaming_is_speaker(audio_instance))
           {
-            UX_ENDPOINT *ep = audio_instance->ux_host_class_audio_isochronous_endpoint;
-            /* Accept if ep is NULL (alt setting 0 — real endpoint appears after
-               sampling_set) or confirmed OUT (bit7 = 0). Reject confirmed IN (mic). */
-            if (ep == UX_NULL ||
-                ((ep->ux_endpoint_descriptor.bEndpointAddress & 0x80U) == 0U))
-            {
-              audio_speaker = audio_instance;
-              tx_event_flags_set(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED, TX_OR);
-            }
+            audio_speaker = audio_instance;
+            tx_event_flags_set(&audio_event_flags, AUDIO_FLAG_SPEAKER_CONNECTED, TX_OR);
           }
         }
       }
@@ -243,7 +261,10 @@ UINT ux_host_event_callback(ULONG event, UX_HOST_CLASS *current_class, VOID *cur
     case UX_DEVICE_DISCONNECTION:
 
       /* USER CODE BEGIN UX_DEVICE_DISCONNECTION */
-
+      /* If enumeration had failed (audio_speaker never set), clear the fast-blink
+         so the system returns to a neutral state ready for the next plug-in. */
+      if (audio_speaker == UX_NULL)
+          led_set_state(LED_OFF);
       /* USER CODE END UX_DEVICE_DISCONNECTION */
 
       break;
@@ -284,6 +305,10 @@ VOID ux_host_error_callback(UINT system_level, UINT system_context, UINT error_c
     case UX_DEVICE_ENUMERATION_FAILURE:
 
       /* USER CODE BEGIN UX_DEVICE_ENUMERATION_FAILURE */
+      /* A USB device was plugged in but USBX found no matching class driver
+         for any of its interfaces (e.g. a non-audio device, or a damaged
+         descriptor).  Blink fast so the user knows the device was rejected. */
+      led_set_state(LED_BLINK_ENUM_FAIL);
       audio_playback_usb_disconnect_notify();
       /* USER CODE END UX_DEVICE_ENUMERATION_FAILURE */
 

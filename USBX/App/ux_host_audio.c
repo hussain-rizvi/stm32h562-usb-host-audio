@@ -1103,17 +1103,30 @@ static UINT audio_stream_wav(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file, WAV_INFO
     UINT  inflight = 0;   /* slots currently submitted to USB */
     UX_HOST_CLASS_AUDIO_SAMPLING audio_sampling;
 
+    /* Only 44.1 kHz and 48 kHz are supported on the USB path.
+       Only 16-bit PCM works correctly — the ring buffer holds raw 16-bit words.
+       Skip the file gracefully instead of propagating an error that kills the session. */
+    if (info->bits_per_sample != 16U)
+        return UX_SUCCESS;
+    if (info->sample_rate != 44100U && info->sample_rate != 48000U)
+        return UX_SUCCESS;
+
     audio_sampling.ux_host_class_audio_sampling_channels   = info->channels;
     audio_sampling.ux_host_class_audio_sampling_frequency  = info->sample_rate;
-    audio_sampling.ux_host_class_audio_sampling_resolution = info->bits_per_sample;
+    audio_sampling.ux_host_class_audio_sampling_resolution = 16U;
 
     status = ux_host_class_audio_streaming_sampling_set(audio, &audio_sampling);
     if (status != UX_SUCCESS)
-        return status;
+    {
+        /* UX_NO_ALTERNATE_SETTING: speaker doesn't support this rate/channel combo.
+           Any other non-zero status while abort is pending means real disconnect.
+           In both cases skip this file — do NOT exit the session. */
+        return s_audio_playback_abort ? UX_ERROR : UX_SUCCESS;
+    }
 
     packet_size = ux_host_class_audio_packet_size_get(audio);
     if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
-        return UX_ERROR;  /* unsupported format — skip file */
+        return UX_SUCCESS;  /* speaker reported no usable packet size — skip file */
 
     drain_ctx_reset(&s_usb_drain);
     ring_sem_flush();
@@ -1293,16 +1306,27 @@ static UINT audio_stream_mp3(UX_HOST_CLASS_AUDIO *audio, FX_FILE *file)
 
         if (!sampling_set)
         {
+            /* Only 44.1 kHz and 48 kHz supported on USB path — skip other rates. */
+            if (info.hz != 44100 && info.hz != 48000)
+            {
+                status = UX_SUCCESS;
+                goto mp3_done;
+            }
+
             audio_sampling.ux_host_class_audio_sampling_channels   = (ULONG)info.channels;
             audio_sampling.ux_host_class_audio_sampling_frequency  = (ULONG)info.hz;
             audio_sampling.ux_host_class_audio_sampling_resolution = 16;
             status = ux_host_class_audio_streaming_sampling_set(audio, &audio_sampling);
             if (status != UX_SUCCESS)
+            {
+                /* Format not supported by this speaker — skip file, not session. */
+                status = s_audio_playback_abort ? UX_ERROR : UX_SUCCESS;
                 goto mp3_done;
+            }
             packet_size = ux_host_class_audio_packet_size_get(audio);
             if (packet_size == 0 || packet_size > AUDIO_MAX_PACKET_SIZE)
             {
-                status = UX_ERROR;  /* unsupported format — skip file */
+                status = UX_SUCCESS;  /* skip file */
                 goto mp3_done;
             }
             sampling_set = 1;

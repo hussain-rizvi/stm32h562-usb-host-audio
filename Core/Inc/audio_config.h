@@ -23,6 +23,7 @@ typedef enum {
     LED_ON             = 1,
     LED_BLINK_NO_CARD  = 2,  /* 500 ms toggle — no SD card */
     LED_BLINK_NO_AUDIO = 3,  /* 200 ms toggle — card present but no audio files */
+    LED_BLINK_ENUM_FAIL = 4, /* 100 ms toggle — USB speaker failed enumeration */
 } LedState;
 
 /* Call once from tx_application_define (before scheduler). */

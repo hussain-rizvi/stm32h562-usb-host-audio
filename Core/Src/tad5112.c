@@ -3,12 +3,22 @@
 #define TAD5112_ADDR     0xA0U
 #define TAD5112_TIMEOUT  100U
 
-#define TAD5112_R2       0x02U  /* DEV_MISC_CFG : SLEEP_ENZ               */
+#define TAD5112_R1       0x01U  /* SW_RESET     : software reset (write 0x01) */
+#define TAD5112_R2       0x02U  /* DEV_MISC_CFG : SLEEP_ENZ + DREG_EN + VREF_EN */
 #define TAD5112_R26      0x1AU  /* PASI_CFG0    : format + word length     */
-#define TAD5112_R118     0x76U  /* CH_EN        : channel enable            */
+#define TAD5112_R118     0x76U  /* CH_EN        : output channel pair enable */
 #define TAD5112_R120     0x78U  /* PWR_CFG      : DAC power-down control   */
 
-/* DAC_CH1A_DVOL / DAC_CH2A_DVOL: value = 201 + (gain_dB × 2), 0 = mute */
+#define TAD5112_CH1_CFG  0x64U
+#define TAD5112_CH2_CFG  0x6BU
+#define TAD5112_BLK_EN   0x20U  /* differential line-out, 0.6×Vref CM */
+
+#define TAD5112_CH1A_DRV 0x65U
+#define TAD5112_CH1B_DRV 0x66U
+#define TAD5112_CH2A_DRV 0x6CU
+#define TAD5112_CH2B_DRV 0x6DU
+#define TAD5112_DRV_EN   0x20U  /* line-out driver, audio bandwidth */
+
 #define TAD5112_VOL_CH1  0x67U
 #define TAD5112_VOL_CH2  0x6EU
 #define TAD5112_VOL_0DB  201U
@@ -36,29 +46,58 @@ HAL_StatusTypeDef tad5112_init(I2C_HandleTypeDef *hi2c)
     HAL_StatusTypeDef st;
     uint8_t val;
 
-    /* Wake from sleep */
     val = 0x01U;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_R1,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+    HAL_Delay(2);
+
+    /* 0x09 = SLEEP_ENZ | DREG_EN | VREF_EN — VREF required for analog output */
+    val = 0x09U;
     st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_R2,
                             I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
     if (st != HAL_OK) return st;
     HAL_Delay(3);
 
-    /* PASI_FORMAT[7:6]=01 (I2S), PASI_WLEN[5:4]=11 (32-bit) */
-    val = 0x70U;
+
+    val = 0x30U;
     st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_R26,
                             I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
     if (st != HAL_OK) return st;
 
-    /* Digital mute before enabling outputs */
     vol_write(TAD5112_VOL_MUTE);
 
-    /* Enable output channels 1 and 2 */
+    val = TAD5112_BLK_EN;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH1_CFG,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+
+    val = TAD5112_DRV_EN;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH1A_DRV,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH1B_DRV,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+
+    val = TAD5112_BLK_EN;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH2_CFG,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+
+    val = TAD5112_DRV_EN;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH2A_DRV,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+    st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_CH2B_DRV,
+                            I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
+    if (st != HAL_OK) return st;
+
     val = 0x0CU;
     st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_R118,
                             I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
     if (st != HAL_OK) return st;
 
-    /* Power up DAC channels */
     val = 0x40U;
     st = HAL_I2C_Mem_Write(hi2c, TAD5112_ADDR, TAD5112_R120,
                             I2C_MEMADD_SIZE_8BIT, &val, 1, TAD5112_TIMEOUT);
