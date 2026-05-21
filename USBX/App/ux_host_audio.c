@@ -550,26 +550,19 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     UINT  zero_fills = 0U;
     UINT  status     = UX_SUCCESS;
 
+
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     if (sai_reconfigure(info->sample_rate) != HAL_OK)
         return UX_ERROR;
 
     drain_ctx_reset(&s_sai_drain);
     sai_sem_flush();
 
-    /* Mute the amp for exactly 5 ms around SAI start.  The amp is kept powered
-       between songs (MUTE_Pin stays HIGH) so its internal bias caps remain fully
-       charged; 5 ms of muting means minimal cap discharge and a near-silent
-       re-enable.  After the amp is back on, 20 ms of vol=0 silence lets the
-       TAD5112 fully settle on the stable BCLK before unmute. */
+
     tad5112_mute();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
     remaining = info->data_size;
 
-    /* MUTE_Pin LOW before BCLK starts: blocks the TAD5112 analog output-stage
-       settling transient while the SAI clock restarts.  After 500 ms the DAC
-       output is stable at 0 V (vol=0, zeros playing) so re-enabling the amp
-       is silent. */
-    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     if (sai_transmit_dma_checked() != HAL_OK)
     {
         HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
@@ -578,14 +571,9 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     tx_thread_sleep(50);   /* 500 ms: BCLK stable, TAD5112 synced, vol=0 → 0 V out */
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     tad5112_unmute();
-    /* Flush semaphore counts that piled up during the 500 ms sleep.  DMA ran
-       ~10 half/full callbacks while we slept; consuming stale counts would make
-       the loop write the same DMA half repeatedly without waiting, overlapping
-       a write with an active DMA read and producing noise at song start. */
+
     sai_sem_flush();
-    /* Configure USB alt-interface immediately before the first packet is sent,
-       then pre-fill the ring with silence so the pipeline is never empty while
-       the thread reads SD between SAI half-callbacks. */
+
     sai_usb_configure(info->sample_rate, info->channels);
     sai_usb_prefill();
 
@@ -628,13 +616,12 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
         }
     }
 
-    tad5112_mute();
-    /* Brief MUTE_Pin LOW only around DMAStop: blocks the BCLK-stop glitch from
-       the TAD5112 output stage, but the amp is off for < 1 ms so its charge-pump
-       caps stay charged and re-enable is silent. */
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
+    tx_thread_sleep(50);
+    tad5112_mute();
+
+
     HAL_SAI_DMAStop(&hsai_BlockA1);
-    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     sai_usb_drain();
     sai_sem_flush();
     return status;
@@ -652,14 +639,13 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
     ULONG probe_hz     = 48000U;
     UINT  probe_ch     = 2U;
 
+    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
+
     mp3dec_init(&s_sai_mp3_decoder);
     drain_ctx_reset(&s_sai_drain);
     sai_sem_flush();
 
-    /* Pre-probe the MP3 sample rate so sai_reconfigure() runs BEFORE DMA starts.
-     * Calling it inside sai_fill_half_mp3 on the first DMA callback (while DMA
-     * is already running) re-inits the SAI mid-transfer, stops callbacks, and
-     * causes the 2-second semaphore wait to time out on every WAV<->MP3 switch. */
+
     {
         ULONG nr = 0;
         drain_ctx_read(&s_sai_drain, file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
@@ -698,10 +684,12 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         pcm_off  = 0;
     }
 
+
+
     tad5112_mute();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
-    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
+
     if (sai_transmit_dma_checked() != HAL_OK)
     {
         HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
@@ -746,10 +734,11 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         if (!had_data) zeros++;
     }
 
-    tad5112_mute();
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
+    tx_thread_sleep(50);
+    tad5112_mute();
+
     HAL_SAI_DMAStop(&hsai_BlockA1);
-    HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_SET);
     sai_usb_drain();
     sai_sem_flush();
     return status;
