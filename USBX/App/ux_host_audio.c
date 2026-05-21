@@ -379,11 +379,15 @@ static VOID sai_usb_prefill(VOID);
 static VOID sai_usb_drain(VOID);
 static VOID sai_usb_configure(ULONG sample_rate, UINT channels);
 
-/* Two PLL2 FRACN values — M=1 N=33 P=2 VCIRANGE_3 (VCI=8 MHz, VCO≈270 MHz):
-   FRACN=7117 → PLL2P=135,475,097 Hz: 44100 → 44099.97 Hz (−0.000075%)
-   FRACN=6488 → PLL2P=135,167,969 Hz: 48000 → 47999.99 Hz (−0.000025%)
-                                        32000 → 31999.99 Hz (−0.000025%, NODIV) */
-#define PLL2_FRACN_44K  7117U
+/* PLL2 FRACN values — HSE=8MHz, M=1, N=33, P=2, f_PLL2P = 4000000*(33+FRACN/8192)
+   Only 44.1 kHz and 48 kHz are supported; all other sample rates are skipped.
+
+   44.1 kHz: MCKDIV=12, target f_PLL2P=135,475,200 Hz → FRACN_exact=7117.21
+             FRACN=7118 → f_PLL2P=135,475,097.66 Hz → fs=44099.971 Hz (error=0.029 Hz, 0.66 ppm)
+   48 kHz:   MCKDIV=11, target f_PLL2P=135,168,000 Hz → FRACN_exact=6488.06
+             FRACN=6488 → f_PLL2P=135,167,968.75 Hz → fs=47999.988 Hz (error=0.013 Hz, 0.26 ppm)
+   These are the minimum achievable errors given FRACN resolution (1/8192 ≈ 122 ppm VCO step). */
+#define PLL2_FRACN_44K  7118U
 #define PLL2_FRACN_48K  6488U
 
 static uint32_t s_pll2_fracn = PLL2_FRACN_48K;  /* matches startup init (48k default) */
@@ -413,37 +417,39 @@ static HAL_StatusTypeDef pll2_set_fracn(uint32_t fracn)
 
 /* Reconfigure PLL2 FRACN and SAI MCLKDIV for the given sample rate.
    Called between files; SAI must not be running (DMAStop before this). */
+/* Only 44100 Hz and 48000 Hz are supported. Returns HAL_ERROR for anything else
+   so the caller can skip the file. MCKDIV is hardcoded (not derived from
+   HAL_RCCEx_GetPeriphCLKFreq) to avoid MCKDIV=0 when PLL2 is momentarily off. */
 static HAL_StatusTypeDef sai_reconfigure(ULONG sample_rate)
 {
-    uint32_t freq;
-    uint32_t nodiv;
     uint32_t fracn;
-    switch (sample_rate)
+    uint32_t mckdiv;
+
+    if (sample_rate == 44100U)
     {
-        case  8000U: freq = SAI_AUDIO_FREQUENCY_8K;  nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
-        case 11025U: freq = SAI_AUDIO_FREQUENCY_11K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
-        case 16000U: freq = SAI_AUDIO_FREQUENCY_16K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
-        case 22050U: freq = SAI_AUDIO_FREQUENCY_22K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
-        case 32000U: freq = SAI_AUDIO_FREQUENCY_32K; nodiv = SAI_MASTERDIVIDER_DISABLE; fracn = PLL2_FRACN_48K; break;
-        case 44100U: freq = SAI_AUDIO_FREQUENCY_44K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_44K; break;
-        default:     freq = SAI_AUDIO_FREQUENCY_48K; nodiv = SAI_MASTERDIVIDER_ENABLE;  fracn = PLL2_FRACN_48K; break;
+        fracn  = PLL2_FRACN_44K;
+        mckdiv = 12U;  /* 135,475,098 Hz / (12*256) = 44099.97 Hz */
     }
-    UINT pll_changed = (s_pll2_fracn != fracn);
-    HAL_StatusTypeDef st = pll2_set_fracn(fracn);
-    if (st != HAL_OK)
-        return st;
-    /* Reinit SAI whenever PLL changed — MCKDIV must be recomputed against new PLL2P */
-    if (pll_changed ||
-        hsai_BlockA1.Init.AudioFrequency != freq ||
-        hsai_BlockA1.Init.NoDivider      != nodiv)
+    else if (sample_rate == 48000U)
     {
-        hsai_BlockA1.Init.AudioFrequency = freq;
-        hsai_BlockA1.Init.NoDivider      = nodiv;
-        st = HAL_SAI_Init(&hsai_BlockA1);
-        if (st != HAL_OK)
-            return st;
+        fracn  = PLL2_FRACN_48K;
+        mckdiv = 11U;  /* 135,167,969 Hz / (11*256) = 47999.99 Hz */
     }
-    return HAL_OK;
+    else
+    {
+        return HAL_ERROR;  /* unsupported rate — caller skips the file */
+    }
+
+    (void)pll2_set_fracn(fracn);
+
+    hsai_BlockA1.Init.AudioFrequency = SAI_AUDIO_FREQUENCY_MCKDIV;
+    hsai_BlockA1.Init.Mckdiv         = mckdiv;
+    hsai_BlockA1.Init.NoDivider      = SAI_MASTERDIVIDER_ENABLE;
+    HAL_StatusTypeDef st = HAL_SAI_Init(&hsai_BlockA1);
+    /* Belt-and-suspenders: force MCKDIV directly into CR1 while SAI is disabled. */
+    hsai_BlockA1.Instance->CR1 = (hsai_BlockA1.Instance->CR1 & ~SAI_xCR1_MCKDIV)
+                                 | (mckdiv << 20U);
+    return st;
 }
 
 /* Expand count 16-bit PCM samples into 32-bit MSB-aligned words.
@@ -487,7 +493,12 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
 
             if (samples <= 0)
             {
-                if (*mp3_size == MP3_READ_BUF_SIZE)
+                if (consumed > 0 && (ULONG)consumed <= *mp3_size)
+                {
+                    memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + consumed, *mp3_size - (ULONG)consumed);
+                    *mp3_size -= (ULONG)consumed;
+                }
+                else if (*mp3_size > 0)
                 {
                     memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + 1, *mp3_size - 1);
                     (*mp3_size)--;
@@ -498,8 +509,20 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
 
             memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + consumed, *mp3_size - (ULONG)consumed);
             *mp3_size -= (ULONG)consumed;
-            *pcm_smp   = samples * info.channels;  /* total samples in frame */
-            *pcm_off   = 0;
+
+            if (info.channels == 1)
+            {
+                /* Expand mono to stereo in-place (back-to-front so we don't
+                   overwrite unread samples). SAI is stereo; without this each
+                   mono sample occupies one hardware slot → 2× playback speed. */
+                for (int i = samples - 1; i >= 0; i--)
+                {
+                    s_sai_mp3_pcm_buf[i * 2 + 1] = s_sai_mp3_pcm_buf[i];
+                    s_sai_mp3_pcm_buf[i * 2]     = s_sai_mp3_pcm_buf[i];
+                }
+            }
+            *pcm_smp = samples * 2;  /* always stereo pairs after expansion */
+            *pcm_off = 0;
 
             if (!(*sampling_set))
             {
@@ -530,9 +553,13 @@ static UINT sai_fill_half_mp3(int32_t *dst, ULONG half_cnt, FX_FILE *file,
    g_sai_tx_result, hsai_BlockA1.ErrorCode, hdma_sai1_a.State/ErrorCode,
    and hdma_sai1_a.LinkedListQueue to identify the exact failure mode. */
 static volatile HAL_StatusTypeDef g_sai_tx_result;
+/* Debug: snapshot of SAI1_Block_A CR1 taken just before DMA start.
+   Check g_sai_cr1_debug in the debugger — bits[25:20] = MCKDIV (should be 12 = 0xC for 44.1kHz). */
+volatile uint32_t g_sai_cr1_debug;
 
 static HAL_StatusTypeDef sai_transmit_dma_checked(void)
 {
+    g_sai_cr1_debug = hsai_BlockA1.Instance->CR1;   /* bits[25:20] = MCKDIV */
     g_sai_tx_result = HAL_SAI_Transmit_DMA(&hsai_BlockA1,
                                             (uint8_t *)sai_dma_buf,
                                             SAI_HALF_SAMPLES * 4U);
@@ -550,6 +577,9 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
     UINT  zero_fills = 0U;
     UINT  status     = UX_SUCCESS;
 
+
+    if (info->sample_rate != 44100U && info->sample_rate != 48000U)
+        return UX_SUCCESS;  /* unsupported rate — skip file */
 
     HAL_GPIO_WritePin(MUTE_GPIO_Port, MUTE_Pin, GPIO_PIN_RESET);
     if (sai_reconfigure(info->sample_rate) != HAL_OK)
@@ -601,10 +631,23 @@ static UINT audio_stream_wav_sai(FX_FILE *file, WAV_INFO *info)
 
         if (remaining > 0U)
         {
-            to_read = (remaining > half_pcm_bytes) ? half_pcm_bytes : remaining;
+            /* For mono WAV, read half as many bytes (1 sample fills 2 DMA slots). */
+            ULONG bytes_needed = (info->channels == 1U) ? (half_cnt / 2U * sizeof(int16_t))
+                                                        : half_pcm_bytes;
+            to_read = (remaining > bytes_needed) ? bytes_needed : remaining;
             drain_ctx_read(&s_sai_drain, file, (UCHAR *)s_sai_pcm16_tmp, to_read, &bytes_read);
-            if (bytes_read < half_pcm_bytes)
-                memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, half_pcm_bytes - bytes_read);
+            if (bytes_read < bytes_needed)
+                memset((UCHAR *)s_sai_pcm16_tmp + bytes_read, 0, bytes_needed - bytes_read);
+            if (info->channels == 1U)
+            {
+                /* Expand mono → stereo in-place (back-to-front). */
+                ULONG n = bytes_needed / sizeof(int16_t);
+                for (int i = (int)n - 1; i >= 0; i--)
+                {
+                    s_sai_pcm16_tmp[i * 2 + 1] = s_sai_pcm16_tmp[i];
+                    s_sai_pcm16_tmp[i * 2]     = s_sai_pcm16_tmp[i];
+                }
+            }
             pcm16_to_pcm32(half, s_sai_pcm16_tmp, half_cnt);
             sai_submit_pcm16_to_usb(s_sai_pcm16_tmp, to_read);
             remaining -= to_read;
@@ -647,15 +690,15 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
 
 
     {
-        ULONG nr = 0;
-        drain_ctx_read(&s_sai_drain, file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr);
-        ULONG probe_size = nr;
-
-        while (probe_size > 0)
+        ULONG file_pos = 0;
+        while (!sampling_set)
         {
+            ULONG nr = 0;
+            if (fx_file_seek(file, file_pos) != FX_SUCCESS) break;
+            if (fx_file_read(file, s_sai_mp3_read_buf, MP3_READ_BUF_SIZE, &nr) != FX_SUCCESS || nr == 0) break;
             mp3dec_frame_info_t probe_info;
             int s = mp3dec_decode_frame(&s_sai_mp3_decoder,
-                        (const uint8_t *)s_sai_mp3_read_buf, (int)probe_size,
+                        (const uint8_t *)s_sai_mp3_read_buf, (int)nr,
                         s_sai_mp3_pcm_buf, &probe_info);
             if (s > 0)
             {
@@ -665,13 +708,8 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
                 sampling_set = 1;
                 break;
             }
-            if (probe_size == (ULONG)MP3_READ_BUF_SIZE)
-            {
-                memmove(s_sai_mp3_read_buf, s_sai_mp3_read_buf + 1, probe_size - 1);
-                probe_size--;
-            }
-            else
-                break;
+            if (probe_info.frame_bytes <= 0) break;
+            file_pos += (ULONG)probe_info.frame_bytes;
         }
 
         /* Reset file and decoder so the streaming pass starts from the beginning. */
@@ -684,11 +722,14 @@ static UINT audio_stream_mp3_sai(FX_FILE *file)
         pcm_off  = 0;
     }
 
-
+    if (probe_hz != 44100U && probe_hz != 48000U)
+        return UX_SUCCESS;  /* unsupported sample rate — skip file */
 
     tad5112_mute();
     memset(sai_dma_buf, 0, (SAI_HALF_SAMPLES * 4U) * sizeof(int32_t));
 
+    if (sai_reconfigure(probe_hz) != HAL_OK)
+        return UX_ERROR;
 
     if (sai_transmit_dma_checked() != HAL_OK)
     {
